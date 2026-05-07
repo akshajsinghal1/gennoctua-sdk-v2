@@ -1,0 +1,615 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>@gennoctua/personalize-core — SDK Test</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: #0a0a0f;
+      color: #e5e5e5;
+      font-family: system-ui, sans-serif;
+      font-size: 14px;
+      padding: 32px;
+    }
+    h1 { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
+    .subtitle { color: #666; margin-bottom: 32px; }
+
+    .section { margin-bottom: 28px; }
+    .section-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #555;
+      margin-bottom: 10px;
+    }
+
+    label.file-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: #1a1a2e;
+      border: 1px solid #333;
+      border-radius: 6px;
+      padding: 9px 16px;
+      cursor: pointer;
+      transition: border-color 0.15s;
+    }
+    label.file-btn:hover { border-color: #555; }
+    label.file-btn input { display: none; }
+
+    .status {
+      margin-top: 10px;
+      font-size: 13px;
+      min-height: 20px;
+    }
+    .status.ok    { color: #4ade80; }
+    .status.busy  { color: #facc15; }
+    .status.error { color: #f87171; }
+
+    .categories {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .cat-pill {
+      background: #14532d;
+      color: #86efac;
+      border: 1px solid #166534;
+      border-radius: 4px;
+      padding: 2px 8px;
+      font-size: 11px;
+    }
+
+    .row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: flex-end;
+    }
+    input[type="text"], select {
+      background: #111;
+      border: 1px solid #333;
+      border-radius: 6px;
+      color: #e5e5e5;
+      padding: 9px 12px;
+      font-size: 13px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    input[type="text"]:focus, select:focus { border-color: #555; }
+    input[type="text"] { width: 380px; }
+
+    button {
+      background: #1d4ed8;
+      color: white;
+      border: none;
+      border-radius: 6px;
+      padding: 9px 20px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    button:hover:not(:disabled) { background: #2563eb; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button.green { background: #15803d; }
+    button.green:hover:not(:disabled) { background: #16a34a; }
+
+    .products {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      margin-top: 12px;
+    }
+    .product-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      background: #111;
+      border: 1px solid #222;
+      border-radius: 6px;
+      padding: 8px 10px;
+    }
+    .product-row img.thumb {
+      width: 40px;
+      height: 40px;
+      object-fit: cover;
+      border-radius: 4px;
+      border: 1px solid #333;
+      flex-shrink: 0;
+    }
+    .product-url { color: #666; font-size: 11px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .product-type { font-size: 11px; color: #888; }
+    .remove-btn {
+      background: transparent;
+      color: #444;
+      border: none;
+      font-size: 18px;
+      padding: 0 4px;
+      cursor: pointer;
+      line-height: 1;
+      flex-shrink: 0;
+    }
+    .remove-btn:hover { color: #f87171; }
+
+    .divider { border: none; border-top: 1px solid #1e1e1e; margin: 28px 0; }
+
+    .results-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 16px;
+      margin-top: 12px;
+    }
+    .result-card {
+      background: #111;
+      border: 1px solid #222;
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .result-card .img-wrap {
+      position: relative;
+      aspect-ratio: 1;
+      background: #0a0a0f;
+    }
+    .result-card img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+    .spinner {
+      position: absolute;
+      inset: 0;
+      background: rgba(0,0,0,0.6);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      font-size: 11px;
+      color: #999;
+    }
+    .spin {
+      width: 22px; height: 22px;
+      border: 2px solid #3b82f6;
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .badge {
+      position: absolute;
+      top: 6px; left: 6px;
+      background: #14532d;
+      color: #86efac;
+      font-size: 10px;
+      padding: 2px 6px;
+      border-radius: 3px;
+    }
+    .result-card .footer {
+      padding: 8px 10px;
+    }
+    .result-card .footer p { font-size: 10px; color: #555; margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .toggle-btn {
+      width: 100%;
+      background: transparent;
+      border: 1px solid #333;
+      color: #aaa;
+      border-radius: 4px;
+      padding: 4px;
+      font-size: 10px;
+      cursor: pointer;
+    }
+    .toggle-btn:hover { border-color: #555; color: #fff; }
+    .err-overlay {
+      position: absolute; inset: 0;
+      background: rgba(127,29,29,0.8);
+      display: flex; align-items: center; justify-content: center;
+      padding: 8px;
+      font-size: 10px;
+      color: #fca5a5;
+      text-align: center;
+    }
+    .poll-count { font-size: 10px; color: #555; }
+
+    #log {
+      background: #0d0d0d;
+      border: 1px solid #1a1a1a;
+      border-radius: 6px;
+      padding: 12px;
+      font-family: monospace;
+      font-size: 11px;
+      color: #666;
+      max-height: 180px;
+      overflow-y: auto;
+      margin-top: 12px;
+    }
+    #log .line { margin-bottom: 2px; }
+    #log .line.ok { color: #4ade80; }
+    #log .line.err { color: #f87171; }
+    #log .line.info { color: #60a5fa; }
+  </style>
+</head>
+<body>
+
+<h1>🧪 @gennoctua/personalize-core — SDK Test</h1>
+<p class="subtitle">Test the full try-on pipeline without a real website.</p>
+
+<!-- ── Step 0: Config ─────────────────────────────────────────────── -->
+<div class="section">
+  <div class="section-title">Step 0 — SDK Config</div>
+  <div class="row" style="margin-bottom:12px">
+    <label style="margin-right:16px"><input type="radio" name="authMode" value="publicKey" checked /> Frontend-Only (publicKey)</label>
+    <label><input type="radio" name="authMode" value="proxy" /> Full-Stack (proxyUrl + token)</label>
+  </div>
+
+  <!-- Frontend-only mode -->
+  <div id="publicKeySection" class="row" style="margin-bottom:8px">
+    <input id="publicKeyInput" type="text" placeholder="Brand key — e.g. gn_pk_mauijim_test" style="width:420px" />
+  </div>
+
+  <!-- Full-stack mode -->
+  <div id="proxySection" style="display:none">
+    <div class="row" style="margin-bottom:8px">
+      <input id="proxyUrlInput" type="text" placeholder="Proxy URL — e.g. http://localhost:4000/api/tryon" style="width:420px" />
+    </div>
+    <div class="row" style="margin-bottom:8px">
+      <input id="tokenInput" type="text" placeholder="Session token (JWT)" style="width:420px" />
+    </div>
+  </div>
+
+  <div class="row">
+    <button id="initBtn">Initialize SDK</button>
+  </div>
+  <div id="initStatus" class="status"></div>
+</div>
+
+<!-- ── Step 1: Upload folder ──────────────────────────────────────── -->
+<div class="section">
+  <div class="section-title">Step 1 — Upload photo folder (picks best profile automatically)</div>
+  <label class="file-btn">
+    📁 Select Folder
+    <input id="folderInput" type="file" multiple
+      webkitdirectory directory accept="image/*" />
+  </label>
+  <div id="selectionStatus" class="status"></div>
+  <div id="categoryPills" class="categories"></div>
+</div>
+
+<!-- ── Step 2: Add products ───────────────────────────────────────── -->
+<div class="section">
+  <div class="section-title">Step 2 — Add product image URLs</div>
+  <div class="row">
+    <input id="urlInput" type="text" placeholder="https://example.com/product.jpg" />
+    <select id="typeSelect">
+      <option value="sunglasses">sunglasses</option>
+      <option value="mens_clothing">mens_clothing</option>
+      <option value="womens_clothing">womens_clothing</option>
+      <option value="kids_clothing">kids_clothing</option>
+      <option value="jewellery">jewellery</option>
+      <option value="footwear">footwear</option>
+      <option value="bags">bags</option>
+    </select>
+    <button id="addBtn">+ Add</button>
+  </div>
+  <div id="productList" class="products"></div>
+</div>
+
+<!-- ── Step 3: Run ────────────────────────────────────────────────── -->
+<div class="section">
+  <div class="section-title">Step 3 — Run try-on</div>
+  <button id="runBtn" class="green" disabled>▶ Run All Try-Ons</button>
+</div>
+
+<hr class="divider" />
+
+<!-- ── Results ────────────────────────────────────────────────────── -->
+<div class="section" id="resultsSection" style="display:none">
+  <div class="section-title">Results</div>
+  <div id="resultsGrid" class="results-grid"></div>
+</div>
+
+<!-- ── Debug log ──────────────────────────────────────────────────── -->
+<div class="section">
+  <div class="section-title">Debug log</div>
+  <div id="log"></div>
+</div>
+
+<!-- Load built CDN bundle -->
+<script src="dist/cdn/personalize.min.global.js"></script>
+
+<script>
+// ─── State ────────────────────────────────────────────────────────────────────
+let sdk = null;
+let products = [];   // [{ id, url, type }]
+let cardData = {};   // id → { originalUrl, resultUrl, showPersonalized, state, attempt }
+
+// ─── Log helper ───────────────────────────────────────────────────────────────
+function log(msg, type = '') {
+  const el = document.getElementById('log');
+  const line = document.createElement('div');
+  line.className = 'line ' + type;
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+  console.log(msg);
+}
+
+// ─── Auth mode toggle ─────────────────────────────────────────────────────────
+document.querySelectorAll('input[name="authMode"]').forEach(radio => {
+  radio.addEventListener('change', (e) => {
+    document.getElementById('publicKeySection').style.display = e.target.value === 'publicKey' ? '' : 'none';
+    document.getElementById('proxySection').style.display = e.target.value === 'proxy' ? '' : 'none';
+  });
+});
+
+// ─── Init SDK ─────────────────────────────────────────────────────────────────
+document.getElementById('initBtn').addEventListener('click', async () => {
+  const authMode = document.querySelector('input[name="authMode"]:checked').value;
+  const statusEl = document.getElementById('initStatus');
+
+  let authConfig;
+
+  if (authMode === 'publicKey') {
+    const publicKey = document.getElementById('publicKeyInput').value.trim();
+    if (!publicKey) {
+      statusEl.className = 'status error';
+      statusEl.textContent = '✗ Enter a brand key first';
+      return;
+    }
+    authConfig = { publicKey };
+  } else {
+    const proxyUrl = document.getElementById('proxyUrlInput').value.trim();
+    const token    = document.getElementById('tokenInput').value.trim();
+    if (!proxyUrl) {
+      statusEl.className = 'status error';
+      statusEl.textContent = '✗ Enter a proxy URL first';
+      return;
+    }
+    if (!token) {
+      statusEl.className = 'status error';
+      statusEl.textContent = '✗ Enter a session token first';
+      return;
+    }
+    authConfig = { proxyUrl, getToken: () => token };
+  }
+
+  statusEl.className = 'status busy';
+  statusEl.textContent = 'Initializing…';
+  try {
+    sdk = await window.Personalize.init({
+      auth: authConfig,
+      debug: true,
+      analytics: {
+        onEvent: (e) => log(`📊 ${e.eventName}`, 'info'),
+      },
+    });
+    statusEl.className = 'status ok';
+    statusEl.textContent = '✓ SDK initialized';
+    log('SDK initialized ✓', 'ok');
+    updateRunBtn();
+  } catch (e) {
+    statusEl.className = 'status error';
+    statusEl.textContent = '✗ ' + e.message;
+    log('SDK init failed: ' + e.message, 'err');
+  }
+});
+
+// ─── Step 1: Folder upload ────────────────────────────────────────────────────
+document.getElementById('folderInput').addEventListener('change', async (e) => {
+  const files = e.target.files;
+  if (!files || files.length === 0) return;
+
+  if (!sdk) {
+    document.getElementById('selectionStatus').className = 'status error';
+    document.getElementById('selectionStatus').textContent = '✗ Initialize the SDK first (Step 0)';
+    return;
+  }
+
+  const statusEl = document.getElementById('selectionStatus');
+  const pillsEl  = document.getElementById('categoryPills');
+
+  statusEl.className = 'status busy';
+  statusEl.textContent = `Processing ${files.length} files…`;
+  pillsEl.innerHTML = '';
+
+  log(`Ingesting ${files.length} files…`);
+
+  try {
+    const summary = await sdk.ingestImages(files, (p) => {
+      statusEl.textContent = p.message;
+      log(p.message);
+    });
+
+    statusEl.className = 'status ok';
+    statusEl.textContent = `✓ ${summary.totalUploaded} photos → ${summary.totalSelected} profiles selected`;
+
+    for (const cat of summary.availableCategories) {
+      const pill = document.createElement('span');
+      pill.className = 'cat-pill';
+      pill.textContent = '✓ ' + cat;
+      pillsEl.appendChild(pill);
+    }
+
+    log(`Profile selection done. Categories: ${summary.availableCategories.join(', ')}`, 'ok');
+    updateRunBtn();
+  } catch (err) {
+    statusEl.className = 'status error';
+    statusEl.textContent = '✗ ' + err.message;
+    log('Selection failed: ' + err.message, 'err');
+  }
+});
+
+// ─── Step 2: Add products ─────────────────────────────────────────────────────
+document.getElementById('addBtn').addEventListener('click', addProduct);
+document.getElementById('urlInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') addProduct();
+});
+
+function addProduct() {
+  const url = document.getElementById('urlInput').value.trim();
+  const type = document.getElementById('typeSelect').value;
+  if (!url) return;
+
+  const id = crypto.randomUUID();
+  products.push({ id, url, type });
+  document.getElementById('urlInput').value = '';
+
+  renderProductList();
+  updateRunBtn();
+}
+
+function renderProductList() {
+  const list = document.getElementById('productList');
+  list.innerHTML = '';
+  for (const p of products) {
+    const row = document.createElement('div');
+    row.className = 'product-row';
+    row.innerHTML = `
+      <img class="thumb" src="${p.url}" onerror="this.style.opacity='0.2'" />
+      <span class="product-url" title="${p.url}">${p.url}</span>
+      <span class="product-type">${p.type}</span>
+      <button class="remove-btn" data-id="${p.id}">×</button>
+    `;
+    list.appendChild(row);
+  }
+  list.querySelectorAll('.remove-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      products = products.filter(p => p.id !== btn.dataset.id);
+      renderProductList();
+      updateRunBtn();
+    });
+  });
+}
+
+// ─── Step 3: Run ─────────────────────────────────────────────────────────────
+document.getElementById('runBtn').addEventListener('click', runAll);
+
+function updateRunBtn() {
+  const btn = document.getElementById('runBtn');
+  if (!sdk) { btn.disabled = true; btn.textContent = 'Initialize SDK first'; return; }
+  const hasProfile = sdk.selection.getSummary()?.availableCategories.length > 0;
+  const hasProducts = products.length > 0;
+  btn.disabled = !hasProfile || !hasProducts;
+  if (!hasProfile) btn.textContent = 'Upload a folder first';
+  else if (!hasProducts) btn.textContent = 'Add products first';
+  else btn.textContent = '▶ Run All Try-Ons';
+}
+
+async function runAll() {
+  document.getElementById('resultsSection').style.display = '';
+  const grid = document.getElementById('resultsGrid');
+  grid.innerHTML = '';
+  cardData = {};
+
+  // Build cards
+  for (const p of products) {
+    cardData[p.id] = { originalUrl: p.url, resultUrl: null, showPersonalized: false, state: 'running', attempt: 0 };
+    grid.appendChild(buildCard(p));
+  }
+
+  log(`Running ${products.length} try-ons in parallel…`);
+
+  await Promise.allSettled(products.map(async (p) => {
+    try {
+      const result = await sdk.personalize({
+        imageUrl: p.url,
+        productType: p.type,
+        productId: p.id,
+      });
+
+      cardData[p.id].resultUrl = result.imageUrl;
+      cardData[p.id].state = 'done';
+      cardData[p.id].showPersonalized = true;
+      cardData[p.id].cacheHit = result.cacheHit;
+      refreshCard(p);
+      log(`✓ ${p.type} done${result.cacheHit ? ' (cache hit)' : ''}`, 'ok');
+    } catch (err) {
+      cardData[p.id].state = 'error';
+      cardData[p.id].error = err.message;
+      refreshCard(p);
+      log(`✗ ${p.type} failed: ${err.message}`, 'err');
+    }
+  }));
+
+  log('All try-ons finished.');
+}
+
+// ─── Card rendering ────────────────────────────────────────────────────────────
+function buildCard(p) {
+  const card = document.createElement('div');
+  card.className = 'result-card';
+  card.id = 'card-' + p.id;
+  card.innerHTML = cardHTML(p);
+  card.querySelector('.toggle-btn')?.addEventListener('click', () => toggleCard(p));
+  return card;
+}
+
+function refreshCard(p) {
+  const card = document.getElementById('card-' + p.id);
+  if (!card) return;
+  card.innerHTML = cardHTML(p);
+  card.querySelector('.toggle-btn')?.addEventListener('click', () => toggleCard(p));
+}
+
+function toggleCard(p) {
+  const d = cardData[p.id];
+  if (d.state !== 'done') return;
+  d.showPersonalized = !d.showPersonalized;
+  refreshCard(p);
+}
+
+function cardHTML(p) {
+  const d = cardData[p.id];
+  const imgUrl = d.showPersonalized && d.resultUrl ? d.resultUrl : d.originalUrl;
+
+  let overlay = '';
+  if (d.state === 'running') {
+    overlay = `<div class="spinner"><div class="spin"></div><span>Generating…</span>${d.attempt > 0 ? `<span class="poll-count">poll #${d.attempt}</span>` : ''}</div>`;
+  } else if (d.state === 'error') {
+    overlay = `<div class="err-overlay">${d.error}</div>`;
+  }
+
+  let badge = '';
+  if (d.state === 'done' && d.showPersonalized) badge = `<span class="badge">✓ personalized</span>`;
+
+  let footer = `<p>${p.type}</p>`;
+  if (d.state === 'done') {
+    footer += `<button class="toggle-btn">${d.showPersonalized ? '← Original' : '→ Personalized'}</button>`;
+    if (d.resultUrl) footer += `<a href="${d.resultUrl}" target="_blank" style="display:block;text-align:center;font-size:10px;color:#60a5fa;margin-top:4px;">Open full res ↗</a>`;
+  }
+
+  return `
+    <div class="img-wrap">
+      <img src="${imgUrl}" onerror="this.style.opacity='0.2'" />
+      ${overlay}
+      ${badge}
+    </div>
+    <div class="footer">${footer}</div>
+  `;
+}
+
+// ─── Subscribe to SDK events for poll count ───────────────────────────────────
+// We patch into the running state to show poll attempts
+// (SDK doesn't expose per-product poll count, so we track via a proxy on fetch)
+const _origFetch = window.fetch;
+let pollCounts = {};
+window.fetch = async function(input, init) {
+  const url = typeof input === 'string' ? input : input.url;
+  if (url.includes('/status/')) {
+    // Find which product this poll belongs to (by job id in URL)
+    for (const p of products) {
+      const d = cardData[p.id];
+      if (d && d.state === 'running') {
+        d.attempt = (d.attempt || 0) + 1;
+        refreshCard(p);
+      }
+    }
+  }
+  return _origFetch.apply(this, arguments);
+};
+</script>
+</body>
+</html>
