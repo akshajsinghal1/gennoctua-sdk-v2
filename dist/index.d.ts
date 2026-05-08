@@ -35,7 +35,7 @@ type PublicKeyAuthConfig = {
     gennoctuaUrl?: string;
 };
 type AuthConfig = ProxyAuthConfig | PublicKeyAuthConfig;
-type ProductType = "sunglasses" | "eyeglasses" | "mens_clothing" | "womens_clothing" | "kids_clothing" | "footwear" | "jewellery" | "earrings" | "bags" | "makeup_lipstick" | "makeup_foundation" | "makeup_mascara" | "bedroom_furniture" | "bathroom_furniture" | "living_room_furniture" | "kitchen_furniture" | "home_decor";
+type ProductType = "sunglasses" | "eyeglasses" | "mens_clothing" | "womens_clothing" | "kids_clothing" | "footwear" | "jewellery" | "earrings" | "bags" | "makeup_lipstick" | "makeup_foundation" | "makeup_mascara" | "bedroom_furniture" | "bathroom_furniture" | "living_room_furniture" | "dining_room_furniture" | "kitchen_furniture" | "home_decor";
 type ProductImageSource = "manual" | "selector" | "structured_data" | "platform_adapter" | "dom_heuristic";
 type ProductImageContext = {
     imageUrl: string;
@@ -53,10 +53,12 @@ type ProductContext = {
     pageUrl?: string;
 };
 /**
- * v1: fashion categories only.
- * Phase 2 will add: "bedroom" | "bathroom" | "living_room" | "kitchen"
+ * Required for all person product try-ons.
+ * Tells the SDK which selected profile photo to use.
+ * Ignored for furniture / room products.
  */
-type UserImageCategory = "male_full_body" | "female_full_body" | "child_full_body" | "male_face_closeup" | "female_face_closeup" | "child_face_closeup";
+type UserGender = "male" | "female" | "kid_boy" | "kid_girl";
+type UserImageCategory = "male_full_body" | "female_full_body" | "kid_boy_full_body" | "kid_girl_full_body" | "male_face_closeup" | "female_face_closeup" | "kid_boy_face_closeup" | "kid_girl_face_closeup" | "room_bedroom" | "room_living_room" | "room_dining_room" | "room_kitchen" | "room_bathroom";
 type SelectedImageAsset = {
     category: UserImageCategory;
     imageId: string;
@@ -150,8 +152,24 @@ type AnalyticsConfig = {
     enabled?: boolean;
     onEvent?: (event: AnalyticsEvent) => void;
 };
+/**
+ * Tells the SDK what category of products the brand sells.
+ * Controls which AI pipelines run during image ingestion:
+ *
+ * - "eyewear" | "fashion" | "footwear" | "jewellery" | "bags" | "makeup"
+ *     → face detection only (room classifier never loads)
+ * - "furniture"
+ *     → room classifier only (face detection skipped)
+ * - "all" or not provided
+ *     → both pipelines run on all photos
+ *
+ * Pass an array when a brand sells multiple categories (e.g. Gucci sells
+ * fashion + jewellery + makeup → ["fashion", "jewellery", "makeup"]).
+ */
+type PersonalizationMode = "eyewear" | "fashion" | "footwear" | "jewellery" | "bags" | "makeup" | "furniture" | "all";
 type SDKConfig = {
     auth: AuthConfig;
+    personalizationMode?: PersonalizationMode | PersonalizationMode[];
     product?: ProductConfig;
     cache?: CacheConfig;
     rateLimit?: RateLimitConfig;
@@ -216,10 +234,34 @@ type SDKEventMap = {
     "error": SDKError;
 };
 type SDKEventName = keyof SDKEventMap;
+/**
+ * A room photo candidate ready to be sent to an LLM for final verification.
+ * Sorted by yoloScore descending — index 0 is the strongest YOLO detection.
+ */
+type TopRoomCandidate = {
+    file: File;
+    hash: string;
+    /** Raw YOLO inference score (sum of detected object scores). Higher = more confident. */
+    yoloScore: number;
+    /** Normalised confidence 0–1 */
+    confidence: number;
+    /** Highest-confidence detected object in the image (e.g. "bed", "couch") */
+    topLabel: string;
+};
+/**
+ * Top-5 room candidates per room type, ready to send to an LLM image picker.
+ * Empty array means no images were bucketed into that room type.
+ */
+type TopRoomCandidatesMap = {
+    bedroom: TopRoomCandidate[];
+    living_room: TopRoomCandidate[];
+    dining_room: TopRoomCandidate[];
+};
 type BatchProduct = {
     productId: string;
     imageUrl: string;
     productType: ProductType;
+    gender: UserGender;
 };
 type BatchResult = {
     productId: string;
@@ -264,17 +306,21 @@ type DebugState = {
 };
 
 /**
- * LocalSelectionService
+ * selection.ts — v2
  *
- * Wraps the existing browser AI pipeline (face-api.js + MediaPipe PoseLandmarker)
- * to produce SelectedImageAsset[] from a FileList.
+ * Improvements over v1:
+ * - Front-facing detection (computeFrontFacingDiagnostic, 8-component weighted score)
+ * - Proper standing rank: full_body_standing(1) > knee_visible(2) > upper_body(3) > sitting variants
+ * - Separate selection logic for full_body (pose-first) vs face_closeup (face clarity-first)
+ * - kid_boy / kid_girl are distinct profiles (kid_boy_full_body, kid_boy_face_closeup, etc.)
+ * - iOS safe mode: sequential processing instead of parallel
+ * - Single-person validation: rejects multi-person frames
  *
- * Models load lazily from CDN on first call.
- * All logic is adapted from the battle-tested MauiJim pipeline.
+ * Models load lazily from CDN on first call (singleton pattern).
  */
 
 type SelectionProgress = {
-    phase: "loading_models" | "categorizing" | "ranking" | "complete";
+    phase: "loading_models" | "categorizing" | "scoring" | "ranking" | "complete";
     message: string;
     current?: number;
     total?: number;
@@ -299,9 +345,20 @@ declare class PersonalizeSDK {
     private currentProductContext;
     private viewMode;
     private activeAbortController;
+    /** GCS URLs keyed by asset hash — populated in background after ingestImages() */
+    private profileUrlCache;
     private constructor();
     static init(config: SDKConfig): Promise<PersonalizeSDK>;
     ingestImages(fileList: FileList | null | undefined, onProgress?: (p: SelectionProgress) => void): Promise<SelectionSummary>;
+    /**
+     * Restore a previously selected profile from cache.
+     * Call this on page load — if a cached profile exists, the user can skip
+     * the upload step entirely and go straight to personalization.
+     *
+     * Returns the SelectionSummary if a valid cached profile was found,
+     * or null if no cache exists / cache has expired.
+     */
+    restoreProfile(): Promise<SelectionSummary | null>;
     resolveProduct(overrides?: {
         imageUrl?: string;
         productType?: ProductType;
@@ -309,10 +366,14 @@ declare class PersonalizeSDK {
         productTitle?: string;
     }): Promise<ProductContext>;
     getEligibility(productType?: ProductType): Promise<EligibilityResult>;
-    personalize(overrides?: {
-        imageUrl?: string;
-        productType?: ProductType;
+    personalize(opts: {
+        imageUrl: string;
+        productType: ProductType;
+        /** Required for all person products. Determines which profile photo is used.
+         *  Ignored for furniture / room products. */
+        gender: UserGender;
         productId?: string;
+        abortSignal?: AbortSignal;
     }): Promise<PersonalizationResult>;
     personalizeAll(products: BatchProduct[], onResult?: (result: BatchResult) => void): Promise<BatchResult[]>;
     view: {
@@ -330,6 +391,7 @@ declare class PersonalizeSDK {
         refreshContext: (overrides?: Parameters<PersonalizeSDK["resolveProduct"]>[0]) => Promise<ProductContext>;
     };
     cache: {
+        clearProfile: () => Promise<void>;
         clearSelection: () => Promise<void>;
         clearPersonalization: () => Promise<void>;
         clearAll: () => Promise<void>;
@@ -339,6 +401,27 @@ declare class PersonalizeSDK {
     debug: {
         getState: () => DebugState;
     };
+    /**
+     * Upload each unique selected asset to GCS in the background.
+     * When a product submission fires later, profileUrlCache will already have
+     * the URL — so we send user_image_url instead of re-uploading the blob.
+     * Silent on failure: personalize() falls back to raw blob upload.
+     */
+    private uploadProfilesInBackground;
+    /**
+     * Optionally refine the local-AI selection using the Gennoctua LLM picker.
+     * Compresses top-5 candidates per category to 512px, sends to /api/profile/select,
+     * and swaps out any asset where the LLM found a better pick.
+     * Falls back silently to the original assets on any error or timeout.
+     */
+    private refineSelectionWithLLM;
+    /**
+     * Optionally refine the YOLO room selection using the Gennoctua LLM room picker.
+     * Compresses top-5 candidates per room type to 512px, sends to /api/room/select,
+     * and swaps out any asset where the LLM found a better pick.
+     * Falls back silently to the original YOLO picks on any error or timeout.
+     */
+    private refineRoomsWithLLM;
     cancel(): void;
     reset(): void;
 }
@@ -346,4 +429,57 @@ declare const Personalize: {
     init: typeof PersonalizeSDK.init;
 };
 
-export { type AnalyticsConfig, type AnalyticsEvent, type AuthConfig, type BatchProduct, type BatchResult, type CacheConfig, type DebugState, type EligibilityResult, type PersonalizationResult, type PersonalizationState, Personalize, PersonalizeSDK, type ProductConfig, type ProductContext, type ProductImageContext, type ProductImageSource, type ProductRule, type ProductType, type RateLimitConfig, type SDKConfig, SDKError, type SDKErrorCode, type SDKEventMap, type SDKEventName, type SelectedImageAsset, type SelectionProgress, type SelectionSummary, type UserImageCategory, type ViewMode };
+/**
+ * room-classifier.ts — YOLOv8n ONNX object-detection room classifier
+ *
+ * Ports the Android SDK RoomInference.infer() scoring logic to the web,
+ * upgraded from YOLOv3-tiny to YOLOv8n for significantly stronger detection.
+ *
+ * Scoring rules (tuned against real home photo dataset):
+ *   "bed"          → bedroom      (+2.0, +1.0 bonus if conf > 50%)
+ *   "couch"        → living_room  (+2.0 if area ≥ 8%, else +1.5)
+ *   "tv"           → living_room  (+1.5)
+ *   "chair"        → living_room  (+0.8) when no dining table present
+ *                  → dining_room  (+0.5) when dining table also detected
+ *   "dining table" → dining_room  (+2.0 if area ≥ 8%, +1.0 if area ≥ 3%)
+ *
+ * Anti-false-positive rules:
+ *   - If couch confidence > bed confidence × 0.95 → bedroomScore = 0
+ *     (prevents large sofa from being mistaken for a bed)
+ *   - If TV detected AND bed confidence < 0.32 → bedroomScore = 0
+ *     (prevents low-confidence bed from overriding a strong TV signal)
+ *
+ * Minimum score of 1.5 required to return a classification.
+ * Tie-breaking: bedroom > dining_room > living_room
+ *   (dining only wins if diningScore strictly exceeds livingScore)
+ *
+ * Model: YOLOv8n ONNX (~12 MB)
+ *   Input  "images":  [1, 3, 640, 640] float32  (RGB, values 0..1, no ImageNet norm)
+ *   Output "output0": [1, 84, 8400]    float32  (4 box coords + 80 COCO class scores)
+ */
+/** YOLOv8n ONNX hosted on Gennoctua GCS (~12 MB) */
+declare const DEFAULT_ROOM_MODEL_URL = "https://storage.googleapis.com/gennoctua/yolov8n.onnx";
+type RoomType = "bedroom" | "living_room" | "dining_room" | "kitchen" | "bathroom" | "other";
+type RoomClassification = {
+    roomType: RoomType;
+    /** Normalised confidence 0–1 (derived from YOLO score 0–4+) */
+    confidence: number;
+    /** Raw YOLO inference score (sum of object scores). Use for ranking candidates. */
+    yoloScore: number;
+    /** true when a known room type was detected above the minimum score threshold */
+    isRoom: boolean;
+    /** Highest-confidence detected object label (e.g. "bed", "couch") */
+    label: string;
+};
+/** Reset singleton — forces reload on next call (e.g. to swap model URLs). */
+declare function resetRoomClassifier(): void;
+/**
+ * Classify a room image using YOLOv8n object detection + RoomInference scoring.
+ *
+ * Returns `{ roomType: "other", isRoom: false, yoloScore: 0 }` on any error
+ * or when no furniture is detected above threshold.
+ * ONNX Runtime + model are loaded lazily on the first call (singleton).
+ */
+declare function classifyRoom(file: File, modelUrl?: string): Promise<RoomClassification>;
+
+export { type AnalyticsConfig, type AnalyticsEvent, type AuthConfig, type BatchProduct, type BatchResult, type CacheConfig, DEFAULT_ROOM_MODEL_URL, type DebugState, type EligibilityResult, type PersonalizationMode, type PersonalizationResult, type PersonalizationState, Personalize, PersonalizeSDK, type ProductConfig, type ProductContext, type ProductImageContext, type ProductImageSource, type ProductRule, type ProductType, type RateLimitConfig, type RoomClassification, type RoomType, type SDKConfig, SDKError, type SDKErrorCode, type SDKEventMap, type SDKEventName, type SelectedImageAsset, type SelectionProgress, type SelectionSummary, type TopRoomCandidate, type TopRoomCandidatesMap, type UserGender, type UserImageCategory, type ViewMode, classifyRoom, resetRoomClassifier };

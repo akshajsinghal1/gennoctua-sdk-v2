@@ -80,14 +80,23 @@ __export(api_client_exports, {
   ApiClient: () => ApiClient,
   ENDPOINTS: () => ENDPOINTS
 });
-var ENDPOINTS, ApiClient;
+var ENDPOINTS, EC_BASE_URL, ApiClient;
 var init_api_client = __esm({
   "src/api-client.ts"() {
     init_errors();
     ENDPOINTS = {
+      // Person try-on (fashion, eyewear, footwear, makeup, accessories)
       submit: "/submit",
-      status: "/status"
+      status: "/status",
+      // Room generation (furniture, home decor)
+      generateRoom: "/api/gen/generate-room",
+      roomStatus: "/api/gen/status",
+      // Shared utilities
+      uploadImage: "/api/uploads/user-image",
+      profileSelect: "/api/profile/select",
+      roomSelect: "/api/room/select"
     };
+    EC_BASE_URL = "https://ec.gennoctua.com";
     ApiClient = class {
       constructor(auth) {
         this.auth = auth;
@@ -174,6 +183,70 @@ var init_api_client = __esm({
           reader.releaseLock();
         }
       }
+      // ── Profile image upload ─────────────────────────────────────────────────────
+      /**
+       * Upload a user profile image to GCS via Gennoctua's upload endpoint.
+       * Returns the permanent public GCS URL.
+       * profileKey is used for GCS path organisation (e.g. the asset hash).
+       */
+      async uploadUserImage(blob, _profileKey) {
+        const headers = await this.auth.getHeaders();
+        const form = new FormData();
+        form.append("file", blob, "profile.jpg");
+        const url = `${EC_BASE_URL}${ENDPOINTS.uploadImage}`;
+        let res;
+        try {
+          res = await fetch(url, { method: "POST", headers, body: form });
+        } catch (e) {
+          throw networkError(`Profile upload failed: ${normalizeError(e).message}`);
+        }
+        const data = await this.parseResponse(res, ENDPOINTS.uploadImage);
+        const gcsUrl = typeof data.gcs_url === "string" ? data.gcs_url : null;
+        if (!gcsUrl) throw networkError("Upload endpoint did not return gcs_url");
+        return gcsUrl;
+      }
+      // ── LLM room refinement ─────────────────────────────────────────────────────
+      /**
+       * Send top-5 room candidates per room type to the Gennoctua LLM room selector.
+       * Returns which candidate ID was chosen per room type.
+       * Silently falls back if endpoint is unavailable.
+       */
+      async selectRoomsWithLLM(payload) {
+        const headers = await this.auth.getHeaders();
+        const url = `${EC_BASE_URL}${ENDPOINTS.roomSelect}`;
+        let res;
+        try {
+          res = await fetch(url, {
+            method: "POST",
+            headers: { ...headers, "content-type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+        } catch (e) {
+          throw networkError(`LLM room select failed: ${normalizeError(e).message}`);
+        }
+        return await this.parseResponse(res, ENDPOINTS.roomSelect);
+      }
+      // ── LLM profile refinement ───────────────────────────────────────────────────
+      /**
+       * Send top-5 candidates per category to the Gennoctua LLM profile selector.
+       * Returns which candidate ID was chosen per category, plus full scoring.
+       * Silently falls back if endpoint is unavailable.
+       */
+      async selectProfilesWithLLM(payload) {
+        const headers = await this.auth.getHeaders();
+        const url = `${EC_BASE_URL}${ENDPOINTS.profileSelect}`;
+        let res;
+        try {
+          res = await fetch(url, {
+            method: "POST",
+            headers: { ...headers, "content-type": "application/json" },
+            body: JSON.stringify(payload)
+          });
+        } catch (e) {
+          throw networkError(`LLM profile select failed: ${normalizeError(e).message}`);
+        }
+        return await this.parseResponse(res, ENDPOINTS.profileSelect);
+      }
       // ── Response parser ─────────────────────────────────────────────────────────
       async parseResponse(res, path) {
         if (res.status === 401 || res.status === 403) {
@@ -220,6 +293,7 @@ function resolveConfig(config) {
   validateConfig(config);
   return {
     auth: config.auth,
+    personalizationMode: resolvePersonalizationMode(config.personalizationMode),
     product: {
       detectFromStructuredData: true,
       detectFromDom: true,
@@ -256,6 +330,11 @@ function resolveConfig(config) {
     pollIntervalMs: config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     pollMaxAttempts: config.pollMaxAttempts ?? DEFAULT_POLL_MAX_ATTEMPTS
   };
+}
+function resolvePersonalizationMode(mode) {
+  if (!mode) return ["all"];
+  if (Array.isArray(mode)) return mode.length > 0 ? mode : ["all"];
+  return [mode];
 }
 function validateConfig(config) {
   if (!config) {
@@ -514,6 +593,51 @@ var CacheService = class {
   }
   async clearActiveJob(key) {
     await this.idbDelete(STORE.active_jobs, key);
+  }
+  // ── Profile cache ───────────────────────────────────────────────────────────
+  // Persists selected assets (blobs stored natively in IndexedDB — no base64
+  // conversion needed) + GCS URLs so returning users skip the AI pipeline.
+  profileKey(orgId) {
+    return `${orgId}:profile`;
+  }
+  async saveProfile(orgId, assets, profileUrls, ttlMs) {
+    await this.idbPut(STORE.selected_images, {
+      key: this.profileKey(orgId),
+      assets,
+      profileUrls,
+      cachedAt: Date.now(),
+      ttlMs
+    });
+  }
+  async loadProfile(orgId) {
+    const record = await this.idbGet(
+      STORE.selected_images,
+      this.profileKey(orgId)
+    );
+    if (!record) return null;
+    if (Date.now() - record.cachedAt > record.ttlMs) {
+      await this.idbDelete(STORE.selected_images, record.key);
+      return null;
+    }
+    return { assets: record.assets, profileUrls: record.profileUrls ?? {} };
+  }
+  /**
+   * Patch GCS URLs into an existing profile record without rewriting the blobs.
+   * Called incrementally as background uploads complete.
+   */
+  async updateProfileUrls(orgId, profileUrls) {
+    const record = await this.idbGet(
+      STORE.selected_images,
+      this.profileKey(orgId)
+    );
+    if (!record) return;
+    await this.idbPut(STORE.selected_images, {
+      ...record,
+      profileUrls: { ...record.profileUrls, ...profileUrls }
+    });
+  }
+  async clearProfile(orgId) {
+    await this.idbDelete(STORE.selected_images, this.profileKey(orgId));
   }
   // ── Public clear APIs ───────────────────────────────────────────────────────
   async clearSelection() {
@@ -969,6 +1093,32 @@ var ProductContextService = class {
 
 // src/personalization.ts
 init_errors();
+var FURNITURE_PRODUCT_TYPES = /* @__PURE__ */ new Set([
+  "bedroom_furniture",
+  "bathroom_furniture",
+  "living_room_furniture",
+  "dining_room_furniture",
+  "kitchen_furniture",
+  "home_decor"
+]);
+var ROOM_TYPE_FROM_CATEGORY = {
+  room_bedroom: "bedroom",
+  room_living_room: "living_room",
+  room_kitchen: "kitchen",
+  room_dining_room: "dining_room",
+  room_bathroom: "bathroom"
+};
+var POSE_TAG_FROM_CATEGORY = {
+  male_full_body: "1",
+  female_full_body: "1",
+  kid_boy_full_body: "1",
+  kid_girl_full_body: "1",
+  male_face_closeup: "3",
+  female_face_closeup: "3",
+  kid_boy_face_closeup: "3",
+  kid_girl_face_closeup: "3"
+  // room_* categories intentionally omitted — no pose concept for furniture
+};
 var BROAD_CATEGORY = {
   sunglasses: "eyewear",
   eyeglasses: "eyewear",
@@ -985,6 +1135,7 @@ var BROAD_CATEGORY = {
   bedroom_furniture: "accessories",
   bathroom_furniture: "accessories",
   living_room_furniture: "accessories",
+  dining_room_furniture: "accessories",
   kitchen_furniture: "accessories",
   home_decor: "accessories"
 };
@@ -1004,6 +1155,7 @@ var PRODUCT_TYPE_LABEL = {
   bedroom_furniture: "bedroom furniture",
   bathroom_furniture: "bathroom furniture",
   living_room_furniture: "living room furniture",
+  dining_room_furniture: "dining room furniture",
   kitchen_furniture: "kitchen furniture",
   home_decor: "home decor"
 };
@@ -1019,6 +1171,7 @@ var PersonalizationService = class {
   async personalize(opts) {
     const {
       userImage,
+      userImageUrl,
       userImageHash,
       userImageCategory,
       productImageUrl,
@@ -1049,18 +1202,37 @@ var PersonalizationService = class {
         console.info(`[personalize-sdk] Restoring active job ${jobId}`);
       }
     }
+    const { ENDPOINTS: ENDPOINTS2 } = await Promise.resolve().then(() => (init_api_client(), api_client_exports));
+    const isFurniture = FURNITURE_PRODUCT_TYPES.has(productType);
     if (!jobId) {
-      const form = new FormData();
-      form.append("user_image", userImage, "profile.jpg");
-      form.append("garment_image_url", productImageUrl);
-      form.append("product_type", PRODUCT_TYPE_LABEL[productType] ?? productType);
-      form.append("category", BROAD_CATEGORY[productType] ?? "accessories");
       if (abortSignal?.aborted) {
         this.bus.emit("personalization:cancelled", {});
         throw new Error("Cancelled");
       }
-      const { ENDPOINTS: ENDPOINTS3 } = await Promise.resolve().then(() => (init_api_client(), api_client_exports));
-      const body = await this.api.post(ENDPOINTS3.submit, form);
+      const form = new FormData();
+      let submitPath;
+      if (isFurniture) {
+        const roomType = ROOM_TYPE_FROM_CATEGORY[userImageCategory] ?? "bedroom";
+        form.append("room_type", roomType);
+        if (userImageUrl) {
+          form.append("room_image_url", userImageUrl);
+        } else {
+          form.append("room_image", userImage, "room.jpg");
+        }
+        form.append("object_url", productImageUrl);
+        submitPath = ENDPOINTS2.generateRoom;
+      } else {
+        form.append("user_image", userImage, "profile.jpg");
+        form.append("garment_image_url", productImageUrl);
+        form.append("product_type", PRODUCT_TYPE_LABEL[productType] ?? productType);
+        form.append("category", BROAD_CATEGORY[productType] ?? "accessories");
+        const poseTag = POSE_TAG_FROM_CATEGORY[userImageCategory];
+        if (poseTag !== void 0) {
+          form.append("tag", poseTag);
+        }
+        submitPath = ENDPOINTS2.submit;
+      }
+      const body = await this.api.post(submitPath, form);
       jobId = typeof body.job_id === "string" ? body.job_id : null;
       if (!jobId) throw jobFailedError({ response: body });
       await this.cache.setActiveJob(activeJobKey, jobId);
@@ -1068,8 +1240,7 @@ var PersonalizationService = class {
       this.bus.emit("personalization:job_created", { jobId });
     }
     this.bus.emit("personalization:polling_started", { jobId });
-    const { ENDPOINTS: ENDPOINTS2 } = await Promise.resolve().then(() => (init_api_client(), api_client_exports));
-    const statusPath = `${ENDPOINTS2.status}/${jobId}`;
+    const statusPath = isFurniture ? `${ENDPOINTS2.roomStatus}/${jobId}` : `${ENDPOINTS2.status}/${jobId}`;
     return new Promise((resolve, reject) => {
       let settled = false;
       const timeoutMs = this.config.pollIntervalMs * this.config.pollMaxAttempts;
@@ -1122,12 +1293,260 @@ var PersonalizationService = class {
 
 // src/selection.ts
 init_errors();
+
+// src/room-classifier.ts
+var ONNX_RUNTIME_CDN = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js";
+var ONNX_WASM_PATH = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/";
+var DEFAULT_ROOM_MODEL_URL = "https://storage.googleapis.com/gennoctua/yolov8n.onnx";
+var FURNITURE_CLASS_MAP = {
+  "chair": 56,
+  "couch": 57,
+  "bed": 59,
+  "dining table": 60,
+  "tv": 62
+};
+var RAW_SCORE_THRESHOLD = 0.15;
+var MAX_BOXES_PER_CLASS = {
+  "chair": 4,
+  // dining set / lounge chairs
+  "couch": 2,
+  // L-shaped sectionals
+  "bed": 2,
+  // twin beds
+  "tv": 1,
+  // one TV per room
+  "dining table": 1
+  // one table per room
+};
+var CENTRE_MIN_DIST_PX = 80;
+function inferRoom(detections) {
+  let livingScore = 0;
+  let bedroomScore = 0;
+  let diningScore = 0;
+  let bedConf = 0;
+  let couchConf = 0;
+  let topLabel = "";
+  let topScore = 0;
+  const hasDiningTable = detections.some((d) => d.label === "dining table");
+  for (const d of detections) {
+    if (d.confidence > topScore) {
+      topScore = d.confidence;
+      topLabel = d.label;
+    }
+    switch (d.label) {
+      case "bed":
+        bedroomScore += d.confidence > 0.5 ? 3 : 2;
+        if (d.confidence > bedConf) {
+          bedConf = d.confidence;
+          d.areaPercentage;
+        }
+        break;
+      case "couch":
+        livingScore += d.areaPercentage >= 0.08 ? 2 : 1.5;
+        if (d.confidence > couchConf) couchConf = d.confidence;
+        break;
+      case "tv":
+        livingScore += 1.5;
+        break;
+      case "chair":
+        if (hasDiningTable) diningScore += 0.5;
+        else livingScore += 0.8;
+        break;
+      case "dining table":
+        if (d.areaPercentage >= 0.08) diningScore += 2;
+        else if (d.areaPercentage >= 0.03) diningScore += 1;
+        break;
+    }
+  }
+  if (bedroomScore > 0 && couchConf > bedConf * 0.95) {
+    bedroomScore = 0;
+  }
+  const hasTV = detections.some((d) => d.label === "tv");
+  if (bedroomScore > 0 && hasTV && bedConf < 0.32) {
+    bedroomScore = 0;
+  }
+  const maxScore = Math.max(livingScore, bedroomScore, diningScore);
+  if (maxScore < 1.5) return null;
+  let room;
+  if (bedroomScore === maxScore) room = "bedroom";
+  else if (diningScore > livingScore) room = "dining_room";
+  else room = "living_room";
+  return { room, score: maxScore, topLabel };
+}
+var roomClassifierPromise = null;
+function loadOrtScript() {
+  return new Promise((resolve, reject) => {
+    if (window.ort) {
+      resolve();
+      return;
+    }
+    if (document.querySelector(`script[src="${ONNX_RUNTIME_CDN}"]`)) {
+      const iv = setInterval(() => {
+        if (window.ort) {
+          clearInterval(iv);
+          resolve();
+        }
+      }, 50);
+      setTimeout(() => {
+        clearInterval(iv);
+        reject(new Error("ort load timeout"));
+      }, 2e4);
+      return;
+    }
+    const s = document.createElement("script");
+    s.src = ONNX_RUNTIME_CDN;
+    s.async = true;
+    s.onload = () => setTimeout(resolve, 100);
+    s.onerror = () => reject(new Error(`Failed to load ONNX Runtime: ${ONNX_RUNTIME_CDN}`));
+    document.head.appendChild(s);
+  });
+}
+function ensureRoomClassifierReady(modelUrl = DEFAULT_ROOM_MODEL_URL) {
+  if (!roomClassifierPromise) {
+    roomClassifierPromise = (async () => {
+      await loadOrtScript();
+      const ort = window.ort;
+      if (!ort) throw new Error("onnxruntime-web did not expose window.ort");
+      ort.env.wasm.wasmPaths = ONNX_WASM_PATH;
+      const session = await ort.InferenceSession.create(modelUrl, {
+        executionProviders: ["wasm"],
+        graphOptimizationLevel: "all"
+      });
+      return { ort, session };
+    })();
+  }
+  return roomClassifierPromise;
+}
+function resetRoomClassifier() {
+  roomClassifierPromise = null;
+}
+var YOLO_INPUT_SIZE = 640;
+function preprocessForYolo(img, ort) {
+  const S = YOLO_INPUT_SIZE;
+  const canvas = document.createElement("canvas");
+  canvas.width = S;
+  canvas.height = S;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) throw new Error("canvas 2d context unavailable");
+  ctx.drawImage(img, 0, 0, S, S);
+  const { data } = ctx.getImageData(0, 0, S, S);
+  const float32 = new Float32Array(3 * S * S);
+  for (let y = 0; y < S; y++) {
+    for (let x = 0; x < S; x++) {
+      const pi = (y * S + x) * 4;
+      const ch = y * S + x;
+      float32[0 * S * S + ch] = data[pi] / 255;
+      float32[1 * S * S + ch] = data[pi + 1] / 255;
+      float32[2 * S * S + ch] = data[pi + 2] / 255;
+    }
+  }
+  return new ort.Tensor("float32", float32, [1, 3, S, S]);
+}
+function parseOutputs(outputs, outputNames) {
+  const S = YOLO_INPUT_SIZE;
+  const out = outputs[outputNames[0]];
+  if (!out || out.type !== "float32" || out.dims[2] !== 8400) return [];
+  const N = 8400;
+  const data = out.data;
+  const dets = [];
+  for (const [label, classIdx] of Object.entries(FURNITURE_CLASS_MAP)) {
+    const row = (4 + classIdx) * N;
+    const maxCount = MAX_BOXES_PER_CLASS[label] ?? 1;
+    const candidates = [];
+    for (let b = 0; b < N; b++) {
+      const s = data[row + b];
+      if (s > RAW_SCORE_THRESHOLD) candidates.push({ idx: b, score: s });
+    }
+    if (candidates.length === 0) continue;
+    candidates.sort((a, b) => b.score - a.score);
+    const accepted = [];
+    for (const { idx, score } of candidates) {
+      if (accepted.length >= maxCount) break;
+      const cx = data[0 * N + idx];
+      const cy = data[1 * N + idx];
+      const tooClose = accepted.some((a) => {
+        const dx = cx - a.cx, dy = cy - a.cy;
+        return Math.sqrt(dx * dx + dy * dy) < CENTRE_MIN_DIST_PX;
+      });
+      if (tooClose) continue;
+      const w = data[2 * N + idx];
+      const h = data[3 * N + idx];
+      accepted.push({ cx, cy, score, area: w * h / (S * S) });
+    }
+    for (const { score, area } of accepted) {
+      dets.push({ label, confidence: score, areaPercentage: area });
+    }
+  }
+  return dets.sort((a, b) => b.confidence - a.confidence);
+}
+async function classifyRoom(file, modelUrl) {
+  try {
+    const { ort, session } = await ensureRoomClassifierReady(modelUrl);
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      const url = URL.createObjectURL(file);
+      el.onload = () => {
+        URL.revokeObjectURL(url);
+        resolve(el);
+      };
+      el.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("image load failed"));
+      };
+      el.src = url;
+    });
+    const imageTensor = preprocessForYolo(img, ort);
+    const feeds = {
+      [session.inputNames[0]]: imageTensor
+    };
+    const output = await session.run(feeds);
+    const detections = parseOutputs(output, session.outputNames);
+    const result = inferRoom(detections);
+    if (!result) {
+      return {
+        roomType: "other",
+        confidence: 0,
+        yoloScore: 0,
+        isRoom: false,
+        label: detections[0]?.label ?? "none"
+      };
+    }
+    return {
+      roomType: result.room,
+      // Normalise raw score (typical range 1.5–6) to 0–1
+      confidence: Math.min(1, result.score / 6),
+      yoloScore: result.score,
+      isRoom: true,
+      label: result.topLabel
+    };
+  } catch {
+    return { roomType: "other", confidence: 0, yoloScore: 0, isRoom: false, label: "error" };
+  }
+}
+
+// src/selection.ts
 var FACE_API_CDN = "https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js";
 var FACE_MODELS_CDN = "https://cdn.jsdelivr.net/npm/@vladmandic/face-api@1.7.12/model/";
 var MEDIAPIPE_TASKS_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.mjs";
 var MEDIAPIPE_TASKS_WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm";
 var POSE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task";
 var MAX_IMAGES = 80;
+var POSE_FRONT_FACING_MIN_SCORE = 80;
+var KP_MIN_CONF = 0.16;
+var KP_LOWER_MIN_CONF = 0.28;
+var POSE_SHOULDER_LEVEL_MAX = 0.08;
+var POSE_HIP_LEVEL_MAX = 0.08;
+var POSE_CENTER_OFFSET_MAX = 0.16;
+var POSE_MIN_BODY_HEIGHT = 0.46;
+var POSE_MIN_SHOULDER_WIDTH = 0.12;
+var ROOM_TYPE_TO_CATEGORY = {
+  bedroom: "room_bedroom",
+  living_room: "room_living_room",
+  dining_room: "room_dining_room",
+  kitchen: "room_kitchen",
+  bathroom: "room_bathroom",
+  other: null
+};
 if (typeof window !== "undefined") {
   const _orig = console.error.bind(console);
   console.error = (...args) => {
@@ -1167,9 +1586,28 @@ function ensureFaceApiReady() {
   }
   return faceApiPromise;
 }
+function patchWasmStreamingForIOS() {
+  if (typeof WebAssembly === "undefined") return;
+  const isIOS = isIOSDevice();
+  const supportsStreaming = typeof WebAssembly.compileStreaming === "function";
+  if (!supportsStreaming || isIOS) {
+    const wa = WebAssembly;
+    wa.compileStreaming = async (source) => {
+      const res = await Promise.resolve(source);
+      const buf = await res.arrayBuffer();
+      return WebAssembly.compile(buf);
+    };
+    wa.instantiateStreaming = async (source, imports) => {
+      const res = await Promise.resolve(source);
+      const buf = await res.arrayBuffer();
+      return WebAssembly.instantiate(buf, imports);
+    };
+  }
+}
 function ensurePoseReady() {
   if (!posePromise) {
     posePromise = (async () => {
+      patchWasmStreamingForIOS();
       const { FilesetResolver, PoseLandmarker } = await import(
         /* webpackIgnore: true */
         MEDIAPIPE_TASKS_URL
@@ -1187,6 +1625,10 @@ function ensurePoseReady() {
   }
   return posePromise;
 }
+function isIOSDevice() {
+  if (typeof navigator === "undefined") return false;
+  return /iphone|ipad|ipod/i.test(navigator.userAgent) || navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1;
+}
 function fileToImage(file) {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
@@ -1202,40 +1644,126 @@ function fileToImage(file) {
     img.src = url;
   });
 }
-async function hashFile(file) {
+function hashFile(file) {
   return `${file.name}-${file.size}-${file.lastModified}`;
 }
 function filterValidImages(fileList) {
   return Array.from(fileList || []).filter((f) => f.type.startsWith("image/") || /\.(jpe?g|png|webp|heic)$/i.test(f.name)).slice(0, MAX_IMAGES);
 }
-function point(kp, index, min = 0.2) {
+function pt(kp, index) {
   const p = kp[index];
-  if (!p || typeof p.visibility === "number" && p.visibility < min) return null;
+  if (!p || typeof p.visibility === "number" && p.visibility < KP_MIN_CONF) return null;
   return p;
 }
-async function getPoseScore(file, detector) {
-  const img = await fileToImage(file);
-  const canvas = document.createElement("canvas");
-  const maxSide = 1024;
-  const scale = Math.min(1, maxSide / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
-  canvas.width = Math.max(1, Math.round((img.naturalWidth || 1) * scale));
-  canvas.height = Math.max(1, Math.round((img.naturalHeight || 1) * scale));
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return 0;
-  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+function ptLower(kp, index) {
+  const p = kp[index];
+  if (!p || typeof p.visibility === "number" && p.visibility < KP_LOWER_MIN_CONF) return null;
+  return p;
+}
+function computeFrontFacingDiagnostic(kp) {
+  const nose = pt(kp, 0);
+  const leftEar = pt(kp, 7);
+  const rightEar = pt(kp, 8);
+  const leftShoulder = pt(kp, 11);
+  const rightShoulder = pt(kp, 12);
+  const leftHip = pt(kp, 23);
+  const rightHip = pt(kp, 24);
+  if (!leftShoulder || !rightShoulder) {
+    return { score: 0, label: "side_facing" };
+  }
+  const shoulderWidth = Math.abs(leftShoulder.x - rightShoulder.x);
+  const shoulderMidX = (leftShoulder.x + rightShoulder.x) / 2;
+  const shoulderWidthScore = Math.min(100, shoulderWidth / 0.25 * 100);
+  let hipWidthScore = 50;
+  if (leftHip && rightHip) {
+    const hipWidth = Math.abs(leftHip.x - rightHip.x);
+    hipWidthScore = Math.min(100, hipWidth / 0.18 * 100);
+  }
+  const shoulderTilt = Math.abs(leftShoulder.y - rightShoulder.y);
+  const shoulderLevelScore = Math.max(0, 100 - shoulderTilt / POSE_SHOULDER_LEVEL_MAX * 100);
+  let hipLevelScore = 50;
+  if (leftHip && rightHip) {
+    const hipTilt = Math.abs(leftHip.y - rightHip.y);
+    hipLevelScore = Math.max(0, 100 - hipTilt / POSE_HIP_LEVEL_MAX * 100);
+  }
+  const centerOffset = Math.abs(shoulderMidX - 0.5);
+  const centerScore = Math.max(0, 100 - centerOffset / POSE_CENTER_OFFSET_MAX * 100);
+  let torsoSymmetryScore = 50;
+  if (leftHip && rightHip) {
+    const hipMidX = (leftHip.x + rightHip.x) / 2;
+    const torsoLean = Math.abs(shoulderMidX - hipMidX);
+    torsoSymmetryScore = Math.max(0, 100 - torsoLean / 0.08 * 100);
+  }
+  const leftDist = Math.abs(leftShoulder.x - 0.5);
+  const rightDist = Math.abs(rightShoulder.x - 0.5);
+  const sideRatio = leftDist > rightDist ? leftDist / Math.max(rightDist, 1e-3) : rightDist / Math.max(leftDist, 1e-3);
+  const widthBalanceScore = Math.max(0, 100 - (sideRatio - 1) * 100);
+  let headScore = 50;
+  if (nose && leftEar && rightEar) {
+    const earMidX = (leftEar.x + rightEar.x) / 2;
+    const earSpan = Math.abs(leftEar.x - rightEar.x);
+    const noseDev = Math.abs(nose.x - earMidX);
+    headScore = earSpan > 0.01 ? Math.max(0, 100 - noseDev / Math.max(earSpan * 0.3, 0.02) * 100) : 50;
+  }
+  const score = Math.round(
+    shoulderWidthScore * 0.16 + hipWidthScore * 0.12 + shoulderLevelScore * 0.14 + hipLevelScore * 0.12 + centerScore * 0.14 + torsoSymmetryScore * 0.18 + widthBalanceScore * 0.06 + headScore * 0.08
+  );
+  const label = score >= POSE_FRONT_FACING_MIN_SCORE ? "front_facing" : score >= 45 ? "angled" : "side_facing";
+  return { score, label };
+}
+function rankPoseCandidate(kp) {
+  const { score: frontScore, label: frontLabel } = computeFrontFacingDiagnostic(kp);
+  if (frontScore < POSE_FRONT_FACING_MIN_SCORE) {
+    return { frontScore, frontLabel, poseRank: 0, poseLabel: "not_front_facing" };
+  }
+  const ls = pt(kp, 11);
+  const rs = pt(kp, 12);
+  const lh = pt(kp, 23);
+  const rh = pt(kp, 24);
+  if (!ls || !rs || !lh || !rh) {
+    return { frontScore, frontLabel, poseRank: 0, poseLabel: "insufficient_keypoints" };
+  }
+  if (Math.abs(ls.x - rs.x) < POSE_MIN_SHOULDER_WIDTH) {
+    return { frontScore, frontLabel, poseRank: 0, poseLabel: "shoulder_too_narrow" };
+  }
+  const lk = ptLower(kp, 25);
+  const rk = ptLower(kp, 26);
+  const la = ptLower(kp, 27);
+  const ra = ptLower(kp, 28);
+  const hasKnees = !!(lk && rk);
+  const hasAnkles = !!(la && ra);
+  const bodyTop = Math.min(ls.y, rs.y);
+  const bodyBottom = hasAnkles ? Math.max(la.y, ra.y) : hasKnees ? Math.max(lk.y, rk.y) : Math.max(lh.y, rh.y);
+  const bodyHeight = bodyBottom - bodyTop;
+  const isStanding = bodyHeight >= POSE_MIN_BODY_HEIGHT && ls.y < lh.y && rs.y < rh.y && // shoulders above hips
+  (!hasKnees || lh.y < lk.y && rh.y < rk.y);
+  if (hasAnkles && isStanding) return { frontScore, frontLabel, poseRank: 1, poseLabel: "full_body_standing" };
+  if (hasKnees && isStanding) return { frontScore, frontLabel, poseRank: 2, poseLabel: "knee_visible_standing" };
+  if (!hasKnees && !hasAnkles) return { frontScore, frontLabel, poseRank: 3, poseLabel: "upper_body_standing" };
+  if (hasAnkles) return { frontScore, frontLabel, poseRank: 4, poseLabel: "full_body_sitting" };
+  if (hasKnees) return { frontScore, frontLabel, poseRank: 5, poseLabel: "knee_visible_sitting" };
+  return { frontScore, frontLabel, poseRank: 3, poseLabel: "upper_body" };
+}
+async function getPoseAssessment(file, detector) {
+  const fallback = { frontScore: 0, frontLabel: "side_facing", poseRank: 0, poseLabel: "not_detected" };
   try {
+    const img = await fileToImage(file);
+    const canvas = document.createElement("canvas");
+    const maxSide = 1024;
+    const scale = Math.min(1, maxSide / Math.max(img.naturalWidth || 1, img.naturalHeight || 1));
+    canvas.width = Math.max(1, Math.round((img.naturalWidth || 1) * scale));
+    canvas.height = Math.max(1, Math.round((img.naturalHeight || 1) * scale));
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return fallback;
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     const result = detector.detect(canvas);
-    if (!result?.landmarks?.length || result.landmarks.length > 1) return 0;
-    const kp = result.landmarks[0];
-    if (!point(kp, 11) || !point(kp, 12) || !point(kp, 23) || !point(kp, 24)) return 0;
-    if (point(kp, 27) && point(kp, 28)) return 1;
-    if (point(kp, 25) && point(kp, 26)) return 2;
-    return 3;
+    if (!result?.landmarks?.length || result.landmarks.length > 1) return fallback;
+    return rankPoseCandidate(result.landmarks[0]);
   } catch {
-    return 0;
+    return fallback;
   }
 }
-async function selectImages(fileList, onProgress) {
+async function selectImages(fileList, onProgress, personalizationMode) {
   const files = filterValidImages(fileList);
   if (files.length === 0) {
     throw new exports.SDKError({
@@ -1244,104 +1772,270 @@ async function selectImages(fileList, onProgress) {
       recoverable: true
     });
   }
+  const modes = personalizationMode ?? ["all"];
+  const hasAll = modes.includes("all");
+  const hasFurniture = modes.includes("furniture");
+  const hasPersonMode = modes.some((m) => m !== "furniture" && m !== "all");
+  const needsFaceDetection = hasAll || hasPersonMode || !hasFurniture && !hasPersonMode;
+  const needsRoomClassifier = hasAll || hasFurniture;
   onProgress?.({ phase: "loading_models", message: "Loading AI models..." });
-  const [faceapi, pose] = await Promise.all([ensureFaceApiReady(), ensurePoseReady()]);
-  const opts = new faceapi.TinyFaceDetectorOptions({ inputSize: 608, scoreThreshold: 0.5 });
-  const candidates = [];
-  for (let i = 0; i < files.length; i++) {
-    onProgress?.({
-      phase: "categorizing",
-      message: `Scanning faces ${i + 1} of ${files.length}...`,
-      current: i + 1,
-      total: files.length
-    });
-    try {
-      const img = await fileToImage(files[i]);
-      const faces = await faceapi.detectAllFaces(img, opts).withFaceLandmarks(true).withAgeAndGender();
-      if (faces.length !== 1) continue;
-      const face = faces[0];
-      const gender = face.gender === "male" || face.gender === "female" ? face.gender : null;
-      if (!gender || (face.genderProbability ?? 0) < 0.7) continue;
-      const age = typeof face.age === "number" ? face.age : 25;
-      candidates.push({ file: files[i], gender, age, poseScore: 0 });
-    } catch {
+  const [faceapi, pose] = needsFaceDetection ? await Promise.all([ensureFaceApiReady(), ensurePoseReady()]) : [null, null];
+  const preCandidates = [];
+  if (needsFaceDetection && faceapi) {
+    const faceOpts = new faceapi.TinyFaceDetectorOptions({ inputSize: 608, scoreThreshold: 0.5 });
+    const FACE_BATCH_SIZE = 3;
+    let processed = 0;
+    for (let i = 0; i < files.length; i += FACE_BATCH_SIZE) {
+      const batch = files.slice(i, i + FACE_BATCH_SIZE);
+      onProgress?.({
+        phase: "categorizing",
+        message: `Scanning faces ${processed + 1}\u2013${Math.min(processed + batch.length, files.length)} of ${files.length}...`,
+        current: processed,
+        total: files.length
+      });
+      const batchResults = await Promise.all(
+        batch.map(async (file) => {
+          try {
+            const img = await fileToImage(file);
+            const faces = await faceapi.detectAllFaces(img, faceOpts).withFaceLandmarks(true).withAgeAndGender();
+            return { file, faces };
+          } catch {
+            return { file, faces: [] };
+          }
+        })
+      );
+      for (const { file, faces } of batchResults) {
+        if (faces.length === 0) continue;
+        if (faces.length !== 1) continue;
+        const face = faces[0];
+        const gender = face.gender === "male" || face.gender === "female" ? face.gender : null;
+        if (!gender || (face.genderProbability ?? 0) < 0.7) continue;
+        const box = face.detection?.box;
+        const iw = face.detection?.imageWidth ?? 1;
+        const ih = face.detection?.imageHeight ?? 1;
+        const faceAreaRatio = box ? box.width * box.height / (iw * ih) : 0;
+        preCandidates.push({
+          file,
+          gender,
+          age: typeof face.age === "number" ? face.age : 25,
+          detectionScore: face.detection?.score ?? 0.5,
+          genderProbability: face.genderProbability ?? 0,
+          faceAreaRatio
+        });
+      }
+      processed += batch.length;
     }
   }
-  for (let i = 0; i < candidates.length; i++) {
-    const c = candidates[i];
+  const candidates = [];
+  if (needsFaceDetection && pose) {
+    for (let i = 0; i < preCandidates.length; i++) {
+      onProgress?.({
+        phase: "scoring",
+        message: `Scoring poses ${i + 1} of ${preCandidates.length}...`,
+        current: i + 1,
+        total: preCandidates.length
+      });
+      const assessment = await getPoseAssessment(preCandidates[i].file, pose);
+      candidates.push({ ...preCandidates[i], ...assessment });
+    }
+  }
+  if (candidates.length > 0) {
+    console.table(candidates.map((c) => ({
+      file: c.file.name,
+      gender: c.gender,
+      age: Math.round(c.age),
+      genderProb: +c.genderProbability.toFixed(3),
+      detectionScore: +c.detectionScore.toFixed(3),
+      faceAreaRatio: +c.faceAreaRatio.toFixed(4),
+      frontScore: +c.frontScore.toFixed(1),
+      poseLabel: c.poseLabel,
+      poseRank: c.poseRank,
+      passesFullBody: c.frontScore >= POSE_FRONT_FACING_MIN_SCORE && c.poseRank > 0,
+      passesFaceCloseup: c.frontScore >= POSE_FRONT_FACING_MIN_SCORE
+    })));
+  }
+  const roomCandidates = [];
+  if (needsRoomClassifier) {
     onProgress?.({
-      phase: "ranking",
-      message: `Ranking photos ${i + 1} of ${candidates.length}...`,
-      current: i + 1,
-      total: candidates.length
+      phase: "scoring",
+      message: `Classifying room photos (${files.length} image${files.length > 1 ? "s" : ""})...`,
+      current: 0,
+      total: files.length
     });
-    try {
-      c.poseScore = await getPoseScore(c.file, pose);
-    } catch {
-      c.poseScore = 0;
+    const roomDebugRows = [];
+    for (let i = 0; i < files.length; i++) {
+      const result = await classifyRoom(files[i]);
+      roomDebugRows.push({
+        file: files[i].name,
+        roomType: result.roomType,
+        isRoom: result.isRoom,
+        confidence: +result.confidence.toFixed(3),
+        yoloScore: +result.yoloScore.toFixed(2),
+        topLabel: result.label
+      });
+      if (result.isRoom) {
+        roomCandidates.push({
+          file: files[i],
+          roomType: result.roomType,
+          confidence: result.confidence,
+          yoloScore: result.yoloScore,
+          topLabel: result.label
+        });
+      }
+      onProgress?.({
+        phase: "scoring",
+        message: `Classifying room photos...`,
+        current: i + 1,
+        total: files.length
+      });
+    }
+    if (roomDebugRows.length > 0) {
+      console.table(roomDebugRows);
     }
   }
   const results = [];
-  for (const gender of ["male", "female"]) {
-    const category = gender === "male" ? "male_full_body" : "female_full_body";
-    const pool = candidates.filter((c) => c.gender === gender && c.poseScore > 0).sort((a, b) => a.poseScore - b.poseScore);
-    if (pool[0]) {
-      const hash = await hashFile(pool[0].file);
-      results.push({
-        category,
-        imageId: hash,
-        blob: pool[0].file,
-        hash,
-        confidence: 0.85,
-        qualityScore: 1 / pool[0].poseScore,
-        // lower score = better
-        source: "local_ai",
-        createdAt: (/* @__PURE__ */ new Date()).toISOString()
-      });
-    }
-  }
-  for (const gender of ["male", "female"]) {
-    const category = gender === "male" ? "male_face_closeup" : "female_face_closeup";
-    const pool = candidates.filter((c) => c.gender === gender);
-    if (pool[0]) {
-      const hash = await hashFile(pool[0].file);
-      results.push({
-        category,
-        imageId: hash,
-        blob: pool[0].file,
-        hash,
-        confidence: 0.8,
-        qualityScore: 0.8,
-        source: "local_ai",
-        createdAt: (/* @__PURE__ */ new Date()).toISOString()
-      });
-    }
-  }
-  for (const gender of ["male", "female"]) {
-    const bodyCategory = "child_full_body";
-    const faceCategory = gender === "male" ? "child_face_closeup" : "child_face_closeup";
-    const pool = candidates.filter((c) => c.gender === gender && c.age < 13);
-    if (pool[0]) {
-      const hash = await hashFile(pool[0].file);
-      const base = {
-        imageId: hash,
-        blob: pool[0].file,
-        hash,
-        confidence: 0.75,
-        qualityScore: 0.75,
-        source: "local_ai",
-        createdAt: (/* @__PURE__ */ new Date()).toISOString()
-      };
-      if (!results.find((r) => r.category === bodyCategory)) {
-        results.push({ ...base, category: bodyCategory });
-      }
-      if (!results.find((r) => r.category === faceCategory)) {
-        results.push({ ...base, category: faceCategory });
+  const now = (/* @__PURE__ */ new Date()).toISOString();
+  if (needsFaceDetection) {
+    for (const gender of ["male", "female"]) {
+      const category = gender === "male" ? "male_full_body" : "female_full_body";
+      const pool = candidates.filter((c) => c.gender === gender && c.frontScore >= POSE_FRONT_FACING_MIN_SCORE && c.poseRank > 0).sort(
+        (a, b) => (
+          // Primary: lower rank number = better pose
+          a.poseRank - b.poseRank || // Secondary: higher front score
+          b.frontScore - a.frontScore || // Tertiary: higher gender confidence
+          b.genderProbability - a.genderProbability
+        )
+      );
+      if (pool[0]) {
+        const hash = hashFile(pool[0].file);
+        results.push({
+          category,
+          imageId: hash,
+          blob: pool[0].file,
+          hash,
+          confidence: Math.min(0.95, 0.7 + pool[0].genderProbability * 0.2),
+          qualityScore: pool[0].poseRank === 1 ? 1 : pool[0].poseRank === 2 ? 0.85 : 0.7,
+          source: "local_ai",
+          createdAt: now
+        });
       }
     }
+    for (const gender of ["male", "female"]) {
+      const category = gender === "male" ? "male_face_closeup" : "female_face_closeup";
+      const pool = candidates.filter((c) => c.gender === gender && c.age >= 13 && c.frontScore >= POSE_FRONT_FACING_MIN_SCORE).sort(
+        (a, b) => b.frontScore - a.frontScore || b.faceAreaRatio - a.faceAreaRatio || b.genderProbability - a.genderProbability || b.detectionScore - a.detectionScore
+      );
+      if (pool[0]) {
+        const hash = hashFile(pool[0].file);
+        results.push({
+          category,
+          imageId: hash,
+          blob: pool[0].file,
+          hash,
+          confidence: Math.min(0.95, 0.7 + pool[0].genderProbability * 0.2),
+          qualityScore: pool[0].detectionScore,
+          source: "local_ai",
+          createdAt: now
+        });
+      }
+    }
+    const kidByCandidates = {
+      kid_boy: candidates.filter((c) => c.age < 13 && c.gender === "male"),
+      kid_girl: candidates.filter((c) => c.age < 13 && c.gender === "female")
+    };
+    for (const [kidGender, kidCandidates] of Object.entries(kidByCandidates)) {
+      if (kidCandidates.length === 0) continue;
+      const fullBodyCat = kidGender === "kid_boy" ? "kid_boy_full_body" : "kid_girl_full_body";
+      const faceCat = kidGender === "kid_boy" ? "kid_boy_face_closeup" : "kid_girl_face_closeup";
+      const bodyPool = kidCandidates.filter((c) => c.frontScore >= POSE_FRONT_FACING_MIN_SCORE && c.poseRank > 0).sort((a, b) => a.poseRank - b.poseRank || b.frontScore - a.frontScore);
+      const bodyPick = bodyPool[0] ?? [...kidCandidates].sort((a, b) => b.genderProbability - a.genderProbability)[0];
+      if (bodyPick) {
+        const hash = hashFile(bodyPick.file);
+        results.push({
+          category: fullBodyCat,
+          imageId: hash,
+          blob: bodyPick.file,
+          hash,
+          confidence: 0.75,
+          qualityScore: bodyPool[0] ? bodyPick.poseRank === 1 ? 1 : 0.8 : 0.6,
+          source: "local_ai",
+          createdAt: now
+        });
+      }
+      const facePick = [...kidCandidates].filter((c) => c.frontScore >= POSE_FRONT_FACING_MIN_SCORE).sort(
+        (a, b) => b.frontScore - a.frontScore || b.faceAreaRatio - a.faceAreaRatio || b.genderProbability - a.genderProbability || b.detectionScore - a.detectionScore
+      )[0];
+      if (facePick) {
+        const hash = hashFile(facePick.file);
+        results.push({
+          category: faceCat,
+          imageId: hash,
+          blob: facePick.file,
+          hash,
+          confidence: 0.75,
+          qualityScore: facePick.detectionScore,
+          source: "local_ai",
+          createdAt: now
+        });
+      }
+    }
   }
+  const TOP_ROOM_COUNT = 5;
+  const roomBuckets = /* @__PURE__ */ new Map();
+  for (const rc of roomCandidates) {
+    if (!roomBuckets.has(rc.roomType)) roomBuckets.set(rc.roomType, []);
+    roomBuckets.get(rc.roomType).push(rc);
+  }
+  for (const bucket of roomBuckets.values()) {
+    bucket.sort((a, b) => b.yoloScore - a.yoloScore);
+  }
+  for (const [roomType, bucket] of roomBuckets) {
+    const category = ROOM_TYPE_TO_CATEGORY[roomType];
+    if (!category || bucket.length === 0) continue;
+    const best = bucket[0];
+    const hash = hashFile(best.file);
+    results.push({
+      category,
+      imageId: hash,
+      blob: best.file,
+      hash,
+      confidence: Math.min(0.95, best.confidence),
+      qualityScore: best.confidence,
+      source: "local_ai",
+      createdAt: now
+    });
+  }
+  const toTopRoomCandidate = (rc) => ({
+    file: rc.file,
+    hash: hashFile(rc.file),
+    yoloScore: rc.yoloScore,
+    confidence: rc.confidence,
+    topLabel: rc.topLabel
+  });
+  const topRoomCandidates = {
+    bedroom: (roomBuckets.get("bedroom") ?? []).slice(0, TOP_ROOM_COUNT).map(toTopRoomCandidate),
+    living_room: (roomBuckets.get("living_room") ?? []).slice(0, TOP_ROOM_COUNT).map(toTopRoomCandidate),
+    dining_room: (roomBuckets.get("dining_room") ?? []).slice(0, TOP_ROOM_COUNT).map(toTopRoomCandidate)
+  };
+  const toTopCandidate = (c) => ({
+    file: c.file,
+    hash: hashFile(c.file),
+    age: c.age,
+    poseRank: c.poseRank,
+    frontScore: c.frontScore,
+    genderProbability: c.genderProbability,
+    detectionScore: c.detectionScore,
+    faceAreaRatio: c.faceAreaRatio
+  });
+  const adultSort = (a, b) => a.poseRank - b.poseRank || b.frontScore - a.frontScore || b.genderProbability - a.genderProbability;
+  const topCandidates = {
+    male: candidates.filter((c) => c.gender === "male" && c.age >= 13).sort(adultSort).slice(0, 5).map(toTopCandidate),
+    female: candidates.filter((c) => c.gender === "female" && c.age >= 13).sort(adultSort).slice(0, 5).map(toTopCandidate),
+    kid_boy: candidates.filter((c) => c.gender === "male" && c.age < 13).sort(adultSort).slice(0, 5).map(toTopCandidate),
+    kid_girl: candidates.filter((c) => c.gender === "female" && c.age < 13).sort(adultSort).slice(0, 5).map(toTopCandidate)
+  };
   onProgress?.({ phase: "complete", message: "Selection complete." });
-  return results;
+  return { assets: results, topCandidates, topRoomCandidates };
 }
 
 // src/tagging.ts
@@ -1437,14 +2131,14 @@ var FallbackTaggingService = class {
 // src/mapping.ts
 var PRODUCT_TYPE_MAPPING = {
   // Eyewear
-  sunglasses: ["male_face_closeup", "female_face_closeup", "child_face_closeup"],
-  eyeglasses: ["male_face_closeup", "female_face_closeup", "child_face_closeup"],
+  sunglasses: ["male_face_closeup", "female_face_closeup", "kid_boy_face_closeup", "kid_girl_face_closeup"],
+  eyeglasses: ["male_face_closeup", "female_face_closeup", "kid_boy_face_closeup", "kid_girl_face_closeup"],
   // Clothing
   mens_clothing: ["male_full_body"],
   womens_clothing: ["female_full_body"],
-  kids_clothing: ["child_full_body"],
+  kids_clothing: ["kid_boy_full_body", "kid_girl_full_body"],
   // Footwear
-  footwear: ["male_full_body", "female_full_body", "child_full_body"],
+  footwear: ["male_full_body", "female_full_body", "kid_boy_full_body", "kid_girl_full_body"],
   // Jewellery
   jewellery: ["female_face_closeup", "male_face_closeup"],
   earrings: ["female_face_closeup", "male_face_closeup"],
@@ -1454,13 +2148,44 @@ var PRODUCT_TYPE_MAPPING = {
   makeup_lipstick: ["female_face_closeup", "male_face_closeup"],
   makeup_foundation: ["female_face_closeup", "male_face_closeup"],
   makeup_mascara: ["female_face_closeup", "male_face_closeup"],
-  // Furniture & decor — Phase 2, no user image category yet
-  bedroom_furniture: [],
-  bathroom_furniture: [],
-  living_room_furniture: [],
-  kitchen_furniture: [],
-  home_decor: []
+  // Furniture & decor — requires a room photo of the matching space
+  bedroom_furniture: ["room_bedroom"],
+  bathroom_furniture: ["room_bathroom"],
+  living_room_furniture: ["room_living_room"],
+  dining_room_furniture: ["room_dining_room"],
+  kitchen_furniture: ["room_kitchen"],
+  // home_decor accepts any room type — first available match wins
+  home_decor: ["room_bedroom", "room_living_room", "room_dining_room", "room_kitchen", "room_bathroom"]
 };
+var PRODUCT_NEEDS = {
+  sunglasses: "face",
+  eyeglasses: "face",
+  mens_clothing: "body",
+  womens_clothing: "body",
+  kids_clothing: "body",
+  footwear: "body",
+  jewellery: "face",
+  earrings: "face",
+  bags: "body",
+  makeup_lipstick: "face",
+  makeup_foundation: "face",
+  makeup_mascara: "face",
+  bedroom_furniture: "room",
+  bathroom_furniture: "room",
+  living_room_furniture: "room",
+  dining_room_furniture: "room",
+  kitchen_furniture: "room",
+  home_decor: "room"
+};
+function resolveCategoryFromGender(productType, gender) {
+  const need = PRODUCT_NEEDS[productType];
+  if (need === "room") return null;
+  const isMale = gender === "male" || gender === "kid_boy";
+  if (gender === "kid_boy") return need === "face" ? "kid_boy_face_closeup" : "kid_boy_full_body";
+  if (gender === "kid_girl") return need === "face" ? "kid_girl_face_closeup" : "kid_girl_full_body";
+  if (isMale) return need === "face" ? "male_face_closeup" : "male_full_body";
+  return need === "face" ? "female_face_closeup" : "female_full_body";
+}
 function getRequiredCategories(productType) {
   return PRODUCT_TYPE_MAPPING[productType] ?? [];
 }
@@ -1479,14 +2204,6 @@ function checkEligibility(productType, summary) {
   }
   const available = summary?.availableCategories ?? [];
   const required = getRequiredCategories(productType);
-  if (required.length === 0) {
-    return {
-      eligible: false,
-      reason: "PRODUCT_TYPE_UNSUPPORTED",
-      productType,
-      availableCategories: available
-    };
-  }
   const match = resolveEligibleCategory(productType, available);
   if (!match) {
     return {
@@ -1510,6 +2227,8 @@ var PersonalizeSDK = class _PersonalizeSDK {
     this.currentProductContext = null;
     this.viewMode = "original";
     this.activeAbortController = null;
+    /** GCS URLs keyed by asset hash — populated in background after ingestImages() */
+    this.profileUrlCache = /* @__PURE__ */ new Map();
     // ── View helpers ────────────────────────────────────────────────────────────
     this.view = {
       showOriginal: () => {
@@ -1543,6 +2262,7 @@ var PersonalizeSDK = class _PersonalizeSDK {
     };
     // ── Cache ───────────────────────────────────────────────────────────────────
     this.cache = {
+      clearProfile: () => this.cacheService.clearProfile(this.orgId),
       clearSelection: () => this.cacheService.clearSelection(),
       clearPersonalization: () => this.cacheService.clearPersonalization(),
       clearAll: () => this.cacheService.clearAll()
@@ -1586,11 +2306,20 @@ var PersonalizeSDK = class _PersonalizeSDK {
     this.bus.emit("upload:started", { fileCount });
     this.dbg.log("ingest_images", { fileCount });
     let assets;
+    let topCandidates;
+    let topRoomCandidates;
     try {
-      assets = await selectImages(fileList, (p) => {
-        onProgress?.(p);
-        this.bus.emit("selection:started", { fileCount });
-      });
+      const output = await selectImages(
+        fileList,
+        (p) => {
+          onProgress?.(p);
+          this.bus.emit("selection:started", { fileCount });
+        },
+        this.config.personalizationMode
+      );
+      assets = output.assets;
+      topCandidates = output.topCandidates;
+      topRoomCandidates = output.topRoomCandidates;
     } catch (e) {
       const err = normalizeError(e);
       this.bus.emit("upload:failed", { error: err.message });
@@ -1598,15 +2327,27 @@ var PersonalizeSDK = class _PersonalizeSDK {
       throw err;
     }
     const allCategories = [
+      // Person — fashion try-on
       "male_full_body",
       "female_full_body",
-      "child_full_body",
+      "kid_boy_full_body",
+      "kid_girl_full_body",
       "male_face_closeup",
       "female_face_closeup",
-      "child_face_closeup"
+      "kid_boy_face_closeup",
+      "kid_girl_face_closeup",
+      // Room — furniture & home decor try-on
+      "room_bedroom",
+      "room_living_room",
+      "room_dining_room",
+      "room_kitchen",
+      "room_bathroom"
     ];
-    const taggedAssets = await this.taggingSvc.maybeTag(assets, allCategories);
+    let taggedAssets = await this.taggingSvc.maybeTag(assets, allCategories);
+    taggedAssets = await this.refineSelectionWithLLM(taggedAssets, topCandidates);
+    taggedAssets = await this.refineRoomsWithLLM(taggedAssets, topRoomCandidates);
     this.selectedAssets = taggedAssets;
+    void this.uploadProfilesInBackground(taggedAssets);
     const available = [...new Set(taggedAssets.map((a) => a.category))];
     const missing = allCategories.filter((c) => !available.includes(c));
     this.selectionSummary = {
@@ -1619,7 +2360,69 @@ var PersonalizeSDK = class _PersonalizeSDK {
     this.bus.emit("upload:completed", { fileCount, validCount: assets.length });
     this.bus.emit("selection:completed", this.selectionSummary);
     this.dbg.setSelectionSummary(this.selectionSummary, null);
+    void this.cacheService.saveProfile(
+      this.orgId,
+      taggedAssets,
+      Object.fromEntries(this.profileUrlCache),
+      this.config.cache.selectionTtlMs
+    ).catch(() => {
+    });
     return this.selectionSummary;
+  }
+  // ── Profile restore ─────────────────────────────────────────────────────────
+  /**
+   * Restore a previously selected profile from cache.
+   * Call this on page load — if a cached profile exists, the user can skip
+   * the upload step entirely and go straight to personalization.
+   *
+   * Returns the SelectionSummary if a valid cached profile was found,
+   * or null if no cache exists / cache has expired.
+   */
+  async restoreProfile() {
+    try {
+      const cached = await this.cacheService.loadProfile(this.orgId);
+      if (!cached || cached.assets.length === 0) return null;
+      this.selectedAssets = cached.assets;
+      for (const [hash, url] of Object.entries(cached.profileUrls)) {
+        this.profileUrlCache.set(hash, url);
+      }
+      const missingUploads = cached.assets.filter(
+        (a) => !this.profileUrlCache.has(a.hash)
+      );
+      if (missingUploads.length > 0) {
+        void this.uploadProfilesInBackground(missingUploads);
+      }
+      const allCategories = [
+        "male_full_body",
+        "female_full_body",
+        "kid_boy_full_body",
+        "kid_girl_full_body",
+        "male_face_closeup",
+        "female_face_closeup",
+        "kid_boy_face_closeup",
+        "kid_girl_face_closeup",
+        "room_bedroom",
+        "room_living_room",
+        "room_dining_room",
+        "room_kitchen",
+        "room_bathroom"
+      ];
+      const available = [...new Set(cached.assets.map((a) => a.category))];
+      const missing = allCategories.filter((c) => !available.includes(c));
+      this.selectionSummary = {
+        availableCategories: available,
+        missingCategories: missing,
+        totalUploaded: 0,
+        // unknown on restore
+        totalSelected: cached.assets.length
+      };
+      this.dbg.setSelectionSummary(this.selectionSummary, null);
+      this.bus.emit("selection:completed", this.selectionSummary);
+      this.dbg.log("profile_restored", { categories: available });
+      return this.selectionSummary;
+    } catch {
+      return null;
+    }
   }
   // ── Product context ─────────────────────────────────────────────────────────
   async resolveProduct(overrides) {
@@ -1649,17 +2452,26 @@ var PersonalizeSDK = class _PersonalizeSDK {
     return result;
   }
   // ── Single-product personalization ─────────────────────────────────────────
-  async personalize(overrides) {
-    const ctx = overrides ? await this.resolveProduct(overrides) : this.currentProductContext ?? await this.resolveProduct();
-    const eligibility = await this.getEligibility(ctx.productType);
-    if (!eligibility.eligible) {
-      throw normalizeError(
-        new Error(
-          `Product not eligible for personalization: ${eligibility.reason}`
-        )
-      );
+  async personalize(opts) {
+    const { imageUrl, productType, gender, productId } = opts;
+    const ctx = await this.resolveProduct({ imageUrl, productType, productId });
+    const resolvedCategory = resolveCategoryFromGender(ctx.productType, gender);
+    let requiredCategory;
+    if (resolvedCategory === null) {
+      const eligibility = await this.getEligibility(ctx.productType);
+      if (!eligibility.eligible) {
+        throw normalizeError(new Error(`Product not eligible for personalization: ${eligibility.reason}`));
+      }
+      requiredCategory = eligibility.requiredCategory;
+    } else {
+      requiredCategory = resolvedCategory;
+      const hasCategory = this.selectionSummary?.availableCategories.includes(requiredCategory);
+      if (!hasCategory) {
+        throw normalizeError(new Error(
+          `No ${requiredCategory} photo found. Upload a ${gender} photo first.`
+        ));
+      }
     }
-    const requiredCategory = eligibility.requiredCategory;
     const asset = this.selectedAssets.find((a) => a.category === requiredCategory);
     if (!asset) {
       throw normalizeError(new Error(`No asset found for category ${requiredCategory}`));
@@ -1678,13 +2490,16 @@ var PersonalizeSDK = class _PersonalizeSDK {
       if (inFlight) return inFlight;
     }
     this.activeAbortController = new AbortController();
+    if (opts.abortSignal) {
+      opts.abortSignal.addEventListener("abort", () => this.activeAbortController?.abort());
+    }
     const promise = this.personalizationSvc.personalize({
       userImage: asset.blob,
+      userImageUrl: this.profileUrlCache.get(asset.hash),
       userImageHash: asset.hash,
       userImageCategory: asset.category,
       productImageUrl: ctx.image.imageUrl,
       productImageHash: ctx.image.imageUrl,
-      // URL used as hash for product images
       productType: ctx.productType,
       productId: ctx.productId,
       abortSignal: this.activeAbortController.signal
@@ -1713,23 +2528,35 @@ var PersonalizeSDK = class _PersonalizeSDK {
   async personalizeAll(products, onResult) {
     const results = await Promise.allSettled(
       products.map(async (p) => {
-        const eligibility = checkEligibility(p.productType, this.selectionSummary);
-        if (!eligibility.eligible) {
-          return {
-            productId: p.productId,
-            status: "ineligible",
-            reason: eligibility.reason
-          };
+        const resolvedCategory = resolveCategoryFromGender(p.productType, p.gender);
+        let requiredCategory;
+        if (resolvedCategory === null) {
+          const eligibility = checkEligibility(p.productType, this.selectionSummary);
+          if (!eligibility.eligible) {
+            const r = { productId: p.productId, status: "ineligible", reason: eligibility.reason };
+            onResult?.(r);
+            return r;
+          }
+          requiredCategory = eligibility.requiredCategory;
+        } else {
+          requiredCategory = resolvedCategory;
+          const hasCategory = this.selectionSummary?.availableCategories.includes(requiredCategory);
+          if (!hasCategory) {
+            const r = { productId: p.productId, status: "ineligible", reason: "REQUIRED_USER_IMAGE_MISSING" };
+            onResult?.(r);
+            return r;
+          }
         }
-        const asset = this.selectedAssets.find(
-          (a) => a.category === eligibility.requiredCategory
-        );
+        const asset = this.selectedAssets.find((a) => a.category === requiredCategory);
         if (!asset) {
-          return { productId: p.productId, status: "ineligible", reason: "REQUIRED_USER_IMAGE_MISSING" };
+          const r = { productId: p.productId, status: "ineligible", reason: "REQUIRED_USER_IMAGE_MISSING" };
+          onResult?.(r);
+          return r;
         }
         try {
           const result = await this.personalizationSvc.personalize({
             userImage: asset.blob,
+            userImageUrl: this.profileUrlCache.get(asset.hash),
             userImageHash: asset.hash,
             userImageCategory: asset.category,
             productImageUrl: p.imageUrl,
@@ -1769,6 +2596,208 @@ var PersonalizeSDK = class _PersonalizeSDK {
     this.bus.off(event, handler);
   }
   // ── Cancel + Reset ───────────────────────────────────────────────────────────
+  // ── Private: GCS profile pre-upload ────────────────────────────────────────
+  /**
+   * Upload each unique selected asset to GCS in the background.
+   * When a product submission fires later, profileUrlCache will already have
+   * the URL — so we send user_image_url instead of re-uploading the blob.
+   * Silent on failure: personalize() falls back to raw blob upload.
+   */
+  uploadProfilesInBackground(assets) {
+    const seen = /* @__PURE__ */ new Set();
+    for (const asset of assets) {
+      if (seen.has(asset.hash) || this.profileUrlCache.has(asset.hash)) continue;
+      seen.add(asset.hash);
+      void (async () => {
+        try {
+          const url = await this.api.uploadUserImage(asset.blob, asset.hash);
+          this.profileUrlCache.set(asset.hash, url);
+          this.dbg.log("profile_upload_ok", { hash: asset.hash });
+          void this.cacheService.updateProfileUrls(this.orgId, { [asset.hash]: url }).catch(() => {
+          });
+        } catch (e) {
+          this.dbg.log("profile_upload_failed", { hash: asset.hash, error: normalizeError(e).message });
+        }
+      })();
+    }
+  }
+  // ── Private: LLM profile refinement ────────────────────────────────────────
+  /**
+   * Optionally refine the local-AI selection using the Gennoctua LLM picker.
+   * Compresses top-5 candidates per category to 512px, sends to /api/profile/select,
+   * and swaps out any asset where the LLM found a better pick.
+   * Falls back silently to the original assets on any error or timeout.
+   */
+  async refineSelectionWithLLM(assets, topCandidates) {
+    const hasAnyCandidates = Object.values(topCandidates).some((arr) => arr.length > 0);
+    if (!hasAnyCandidates) return assets;
+    try {
+      const compress = (file) => new Promise((resolve, reject) => {
+        const img = new Image();
+        const objectUrl = URL.createObjectURL(file);
+        img.onload = () => {
+          URL.revokeObjectURL(objectUrl);
+          const maxSide = 512;
+          const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+          const w = Math.max(1, Math.round(img.naturalWidth * scale));
+          const h = Math.max(1, Math.round(img.naturalHeight * scale));
+          const canvas = document.createElement("canvas");
+          canvas.width = w;
+          canvas.height = h;
+          canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+          resolve(canvas.toDataURL("image/jpeg", 0.8));
+        };
+        img.onerror = () => {
+          URL.revokeObjectURL(objectUrl);
+          reject(new Error("compress failed"));
+        };
+        img.src = objectUrl;
+      });
+      const idToCandidate = /* @__PURE__ */ new Map();
+      const buildPayload = async (cat, gender) => {
+        const result = [];
+        for (let i = 0; i < topCandidates[cat].length; i++) {
+          const c = topCandidates[cat][i];
+          const id = `${cat}_${i}`;
+          idToCandidate.set(id, c);
+          const imageDataUrl = await compress(c.file).catch(() => "");
+          if (!imageDataUrl) continue;
+          result.push({
+            id,
+            imageDataUrl,
+            poseScore: c.poseRank,
+            faceCount: 1,
+            photoName: c.file.name,
+            detectedGender: gender,
+            detectedAge: Math.round(c.age)
+          });
+        }
+        return result;
+      };
+      const [male, female, kid_boy, kid_girl] = await Promise.all([
+        buildPayload("male", "male"),
+        buildPayload("female", "female"),
+        buildPayload("kid_boy", "male"),
+        buildPayload("kid_girl", "female")
+      ]);
+      const llmResult = await this.api.selectProfilesWithLLM({ categories: { male, female, kid_boy, kid_girl } });
+      if (llmResult.skipped) return assets;
+      const updatedAssets = [...assets];
+      for (const [catKey, selectedId] of Object.entries(llmResult.selected)) {
+        if (!selectedId) continue;
+        const candidate = idToCandidate.get(selectedId);
+        if (!candidate) continue;
+        const newHash = candidate.hash;
+        const targetCategories = catKey === "kid_boy" ? ["kid_boy_full_body", "kid_boy_face_closeup"] : catKey === "kid_girl" ? ["kid_girl_full_body", "kid_girl_face_closeup"] : catKey === "male" ? ["male_full_body", "male_face_closeup"] : ["female_full_body", "female_face_closeup"];
+        for (const targetCat of targetCategories) {
+          const idx = updatedAssets.findIndex((a) => a.category === targetCat);
+          if (idx === -1) continue;
+          if ((targetCat === "male_full_body" || targetCat === "female_full_body" || targetCat === "kid_boy_full_body" || targetCat === "kid_girl_full_body") && candidate.poseRank === 0) {
+            continue;
+          }
+          updatedAssets[idx] = {
+            ...updatedAssets[idx],
+            imageId: newHash,
+            blob: candidate.file,
+            hash: newHash,
+            source: "merged"
+          };
+        }
+      }
+      this.dbg.log("llm_profile_refinement_ok", { model: llmResult.model });
+      return updatedAssets;
+    } catch (e) {
+      const err = normalizeError(e);
+      this.dbg.log("llm_profile_refinement_failed", { error: err.message, details: err.details });
+      return assets;
+    }
+  }
+  // ── Private: LLM room refinement ───────────────────────────────────────────
+  /**
+   * Optionally refine the YOLO room selection using the Gennoctua LLM room picker.
+   * Compresses top-5 candidates per room type to 512px, sends to /api/room/select,
+   * and swaps out any asset where the LLM found a better pick.
+   * Falls back silently to the original YOLO picks on any error or timeout.
+   */
+  async refineRoomsWithLLM(assets, topRoomCandidates) {
+    const hasAnyCandidates = topRoomCandidates.bedroom.length > 0 || topRoomCandidates.living_room.length > 0 || topRoomCandidates.dining_room.length > 0;
+    if (!hasAnyCandidates) return assets;
+    try {
+      const compress = (file) => new Promise((resolve, reject) => {
+        const img = new Image();
+        const objectUrl = URL.createObjectURL(file);
+        img.onload = () => {
+          URL.revokeObjectURL(objectUrl);
+          const scale = Math.min(1, 512 / Math.max(img.width, img.height));
+          const w = Math.round(img.width * scale);
+          const h = Math.round(img.height * scale);
+          const canvas = document.createElement("canvas");
+          canvas.width = w;
+          canvas.height = h;
+          canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+          resolve(canvas.toDataURL("image/jpeg", 0.82));
+        };
+        img.onerror = () => {
+          URL.revokeObjectURL(objectUrl);
+          reject(new Error("compress failed"));
+        };
+        img.src = objectUrl;
+      });
+      const idToFile = /* @__PURE__ */ new Map();
+      const buildPayload = async (roomKey) => {
+        const result = [];
+        for (let i = 0; i < topRoomCandidates[roomKey].length; i++) {
+          const c = topRoomCandidates[roomKey][i];
+          const id = `${roomKey}_${i}`;
+          idToFile.set(id, c.file);
+          const imageDataUrl = await compress(c.file).catch(() => "");
+          if (!imageDataUrl) continue;
+          result.push({ id, imageDataUrl, yoloScore: c.yoloScore, topLabel: c.topLabel });
+        }
+        return result;
+      };
+      const [bedroom, living_room, dining_room] = await Promise.all([
+        buildPayload("bedroom"),
+        buildPayload("living_room"),
+        buildPayload("dining_room")
+      ]);
+      const llmResult = await this.api.selectRoomsWithLLM({ categories: { bedroom, living_room, dining_room } });
+      if (llmResult.skipped) return assets;
+      const updatedAssets = [...assets];
+      const roomKeyToCategory = {
+        bedroom: "room_bedroom",
+        living_room: "room_living_room",
+        dining_room: "room_dining_room"
+      };
+      for (const [roomKey, selectedId] of Object.entries(llmResult.selected)) {
+        const targetCat = roomKeyToCategory[roomKey];
+        if (!selectedId) {
+          if (topRoomCandidates[roomKey].length > 0) {
+            const idx2 = updatedAssets.findIndex((a) => a.category === targetCat);
+            if (idx2 !== -1) updatedAssets.splice(idx2, 1);
+          }
+          continue;
+        }
+        const file = idToFile.get(selectedId);
+        if (!file) continue;
+        const idx = updatedAssets.findIndex((a) => a.category === targetCat);
+        if (idx === -1) continue;
+        const newHash = `${file.name}-${file.size}-${file.lastModified}`;
+        updatedAssets[idx] = {
+          ...updatedAssets[idx],
+          imageId: newHash,
+          blob: file,
+          hash: newHash,
+          source: "merged"
+        };
+      }
+      this.dbg.log("llm_room_refinement_ok", { model: llmResult.model });
+      return updatedAssets;
+    } catch (e) {
+      this.dbg.log("llm_room_refinement_failed", { error: normalizeError(e).message });
+      return assets;
+    }
+  }
   cancel() {
     this.activeAbortController?.abort();
     this.activeAbortController = null;
@@ -1778,6 +2807,7 @@ var PersonalizeSDK = class _PersonalizeSDK {
     this.cancel();
     this.selectedAssets = [];
     this.selectionSummary = null;
+    this.profileUrlCache.clear();
     this.currentProductContext = null;
     this.viewMode = "original";
     this.rateLimit.reset();
@@ -1785,6 +2815,8 @@ var PersonalizeSDK = class _PersonalizeSDK {
     this.dbg.setSelectionSummary(null, null);
     this.dbg.setEligibility(null);
     this.dbg.setPersonalizationState("idle");
+    void this.cacheService.clearProfile(this.orgId).catch(() => {
+    });
   }
 };
 var Personalize = {
@@ -1794,7 +2826,10 @@ var Personalize = {
 // src/index.ts
 init_errors();
 
+exports.DEFAULT_ROOM_MODEL_URL = DEFAULT_ROOM_MODEL_URL;
 exports.Personalize = Personalize;
 exports.PersonalizeSDK = PersonalizeSDK;
+exports.classifyRoom = classifyRoom;
+exports.resetRoomClassifier = resetRoomClassifier;
 //# sourceMappingURL=index.cjs.map
 //# sourceMappingURL=index.cjs.map

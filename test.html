@@ -260,6 +260,21 @@
     </div>
   </div>
 
+  <div class="row" style="margin-bottom:12px">
+    <span style="color:#666;font-size:12px;margin-right:8px">personalizationMode:</span>
+    <select id="modeSelect" style="width:auto">
+      <option value="all">all (default)</option>
+      <option value="eyewear">eyewear</option>
+      <option value="fashion">fashion</option>
+      <option value="footwear">footwear</option>
+      <option value="jewellery">jewellery</option>
+      <option value="bags">bags</option>
+      <option value="makeup">makeup</option>
+      <option value="furniture">furniture</option>
+    </select>
+    <span style="color:#555;font-size:11px;margin-left:8px" id="modeHint"></span>
+  </div>
+
   <div class="row">
     <button id="initBtn">Initialize SDK</button>
   </div>
@@ -379,13 +394,28 @@ document.getElementById('initBtn').addEventListener('click', async () => {
   statusEl.className = 'status busy';
   statusEl.textContent = 'Initializing…';
   try {
+    const modeVal = document.getElementById('modeSelect').value;
+    const personalizationMode = modeVal === 'all' ? undefined : [modeVal];
+
     sdk = await window.Personalize.init({
       auth: authConfig,
+      personalizationMode,
       debug: true,
       analytics: {
         onEvent: (e) => log(`📊 ${e.eventName}`, 'info'),
       },
     });
+    const modeHints = {
+      eyewear: '→ face detection only',
+      fashion: '→ face detection only',
+      footwear: '→ face detection only',
+      jewellery: '→ face detection only',
+      bags: '→ face detection only',
+      makeup: '→ face detection only',
+      furniture: '→ room classifier only (50MB ONNX loads)',
+      all: '→ both pipelines',
+    };
+    document.getElementById('modeHint').textContent = modeHints[modeVal] ?? '';
     statusEl.className = 'status ok';
     statusEl.textContent = '✓ SDK initialized';
     log('SDK initialized ✓', 'ok');

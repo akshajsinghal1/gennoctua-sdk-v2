@@ -1,4 +1,4 @@
-import type { ProductType, UserImageCategory, EligibilityResult, SelectionSummary } from "./types.js";
+import type { ProductType, UserImageCategory, EligibilityResult, SelectionSummary, UserGender } from "./types.js";
 
 /**
  * Maps each product type to the required user image categories (in priority order).
@@ -6,14 +6,14 @@ import type { ProductType, UserImageCategory, EligibilityResult, SelectionSummar
  */
 export const PRODUCT_TYPE_MAPPING: Record<ProductType, UserImageCategory[]> = {
   // Eyewear
-  sunglasses:             ["male_face_closeup", "female_face_closeup", "child_face_closeup"],
-  eyeglasses:             ["male_face_closeup", "female_face_closeup", "child_face_closeup"],
+  sunglasses:             ["male_face_closeup", "female_face_closeup", "kid_boy_face_closeup", "kid_girl_face_closeup"],
+  eyeglasses:             ["male_face_closeup", "female_face_closeup", "kid_boy_face_closeup", "kid_girl_face_closeup"],
   // Clothing
   mens_clothing:          ["male_full_body"],
   womens_clothing:        ["female_full_body"],
-  kids_clothing:          ["child_full_body"],
+  kids_clothing:          ["kid_boy_full_body", "kid_girl_full_body"],
   // Footwear
-  footwear:               ["male_full_body", "female_full_body", "child_full_body"],
+  footwear:               ["male_full_body", "female_full_body", "kid_boy_full_body", "kid_girl_full_body"],
   // Jewellery
   jewellery:              ["female_face_closeup", "male_face_closeup"],
   earrings:               ["female_face_closeup", "male_face_closeup"],
@@ -23,13 +23,59 @@ export const PRODUCT_TYPE_MAPPING: Record<ProductType, UserImageCategory[]> = {
   makeup_lipstick:        ["female_face_closeup", "male_face_closeup"],
   makeup_foundation:      ["female_face_closeup", "male_face_closeup"],
   makeup_mascara:         ["female_face_closeup", "male_face_closeup"],
-  // Furniture & decor — Phase 2, no user image category yet
-  bedroom_furniture:      [] as unknown as UserImageCategory[],
-  bathroom_furniture:     [] as unknown as UserImageCategory[],
-  living_room_furniture:  [] as unknown as UserImageCategory[],
-  kitchen_furniture:      [] as unknown as UserImageCategory[],
-  home_decor:             [] as unknown as UserImageCategory[],
+  // Furniture & decor — requires a room photo of the matching space
+  bedroom_furniture:      ["room_bedroom"],
+  bathroom_furniture:     ["room_bathroom"],
+  living_room_furniture:  ["room_living_room"],
+  dining_room_furniture:  ["room_dining_room"],
+  kitchen_furniture:      ["room_kitchen"],
+  // home_decor accepts any room type — first available match wins
+  home_decor:             ["room_bedroom", "room_living_room", "room_dining_room", "room_kitchen", "room_bathroom"],
 };
+
+// ─── Gender → Category resolution ────────────────────────────────────────────
+
+type ProductNeed = "face" | "body" | "room";
+
+const PRODUCT_NEEDS: Record<ProductType, ProductNeed> = {
+  sunglasses:             "face",
+  eyeglasses:             "face",
+  mens_clothing:          "body",
+  womens_clothing:        "body",
+  kids_clothing:          "body",
+  footwear:               "body",
+  jewellery:              "face",
+  earrings:               "face",
+  bags:                   "body",
+  makeup_lipstick:        "face",
+  makeup_foundation:      "face",
+  makeup_mascara:         "face",
+  bedroom_furniture:      "room",
+  bathroom_furniture:     "room",
+  living_room_furniture:  "room",
+  dining_room_furniture:  "room",
+  kitchen_furniture:      "room",
+  home_decor:             "room",
+};
+
+/**
+ * Resolves the exact UserImageCategory to use for a person product + gender combo.
+ * Returns null for furniture/room products (gender is irrelevant for those).
+ */
+export function resolveCategoryFromGender(
+  productType: ProductType,
+  gender: UserGender,
+): UserImageCategory | null {
+  const need = PRODUCT_NEEDS[productType];
+  if (need === "room") return null;
+
+  const isMale = gender === "male" || gender === "kid_boy";
+
+  if (gender === "kid_boy")  return need === "face" ? "kid_boy_face_closeup"  : "kid_boy_full_body";
+  if (gender === "kid_girl") return need === "face" ? "kid_girl_face_closeup" : "kid_girl_full_body";
+  if (isMale)                return need === "face" ? "male_face_closeup"     : "male_full_body";
+  return                            need === "face" ? "female_face_closeup"   : "female_full_body";
+}
 
 export function getRequiredCategories(productType: ProductType): UserImageCategory[] {
   return PRODUCT_TYPE_MAPPING[productType] ?? [];
@@ -62,16 +108,6 @@ export function checkEligibility(
 
   const available = summary?.availableCategories ?? [];
   const required = getRequiredCategories(productType);
-
-  // Phase 2 product types have empty required categories in v1
-  if (required.length === 0) {
-    return {
-      eligible: false,
-      reason: "PRODUCT_TYPE_UNSUPPORTED",
-      productType,
-      availableCategories: available,
-    };
-  }
 
   const match = resolveEligibleCategory(productType, available);
 

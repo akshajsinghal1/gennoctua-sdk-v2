@@ -16,7 +16,7 @@ export type ProxyAuthConfig = {
  */
 export type PublicKeyAuthConfig = {
   publicKey: string;
-  gennoctuaUrl?: string; // default: "https://ec.gennoctua.com"
+  gennoctuaUrl?: string; // default: "https://token.gennoctua.com"
 };
 
 export type AuthConfig = ProxyAuthConfig | PublicKeyAuthConfig;
@@ -46,6 +46,7 @@ export type ProductType =
   | "bedroom_furniture"
   | "bathroom_furniture"
   | "living_room_furniture"
+  | "dining_room_furniture"
   | "kitchen_furniture"
   | "home_decor";
 
@@ -73,19 +74,33 @@ export type ProductContext = {
   pageUrl?: string;
 };
 
-// ─── User Image ───────────────────────────────────────────────────────────────
+// ─── User Gender ─────────────────────────────────────────────────────────────
 
 /**
- * v1: fashion categories only.
- * Phase 2 will add: "bedroom" | "bathroom" | "living_room" | "kitchen"
+ * Required for all person product try-ons.
+ * Tells the SDK which selected profile photo to use.
+ * Ignored for furniture / room products.
  */
+export type UserGender = "male" | "female" | "kid_boy" | "kid_girl";
+
+// ─── User Image ───────────────────────────────────────────────────────────────
+
 export type UserImageCategory =
+  // ── Person (fashion) ──────────────────────────────────────────────────────
   | "male_full_body"
   | "female_full_body"
-  | "child_full_body"
+  | "kid_boy_full_body"
+  | "kid_girl_full_body"
   | "male_face_closeup"
   | "female_face_closeup"
-  | "child_face_closeup";
+  | "kid_boy_face_closeup"
+  | "kid_girl_face_closeup"
+  // ── Room (furniture & home decor) ─────────────────────────────────────────
+  | "room_bedroom"
+  | "room_living_room"
+  | "room_dining_room"
+  | "room_kitchen"
+  | "room_bathroom";
 
 export type SelectedImageAsset = {
   category: UserImageCategory;
@@ -218,10 +233,37 @@ export type AnalyticsConfig = {
   onEvent?: (event: AnalyticsEvent) => void;
 };
 
+// ─── Personalization Mode ─────────────────────────────────────────────────────
+
+/**
+ * Tells the SDK what category of products the brand sells.
+ * Controls which AI pipelines run during image ingestion:
+ *
+ * - "eyewear" | "fashion" | "footwear" | "jewellery" | "bags" | "makeup"
+ *     → face detection only (room classifier never loads)
+ * - "furniture"
+ *     → room classifier only (face detection skipped)
+ * - "all" or not provided
+ *     → both pipelines run on all photos
+ *
+ * Pass an array when a brand sells multiple categories (e.g. Gucci sells
+ * fashion + jewellery + makeup → ["fashion", "jewellery", "makeup"]).
+ */
+export type PersonalizationMode =
+  | "eyewear"
+  | "fashion"
+  | "footwear"
+  | "jewellery"
+  | "bags"
+  | "makeup"
+  | "furniture"
+  | "all";
+
 // ─── SDK Config ───────────────────────────────────────────────────────────────
 
 export type SDKConfig = {
   auth: AuthConfig;
+  personalizationMode?: PersonalizationMode | PersonalizationMode[];
   product?: ProductConfig;
   cache?: CacheConfig;
   rateLimit?: RateLimitConfig;
@@ -270,12 +312,40 @@ export type SDKEventMap = {
 
 export type SDKEventName = keyof SDKEventMap;
 
+// ─── Room top-candidates (for LLM refinement) ────────────────────────────────
+
+/**
+ * A room photo candidate ready to be sent to an LLM for final verification.
+ * Sorted by yoloScore descending — index 0 is the strongest YOLO detection.
+ */
+export type TopRoomCandidate = {
+  file: File;
+  hash: string;
+  /** Raw YOLO inference score (sum of detected object scores). Higher = more confident. */
+  yoloScore: number;
+  /** Normalised confidence 0–1 */
+  confidence: number;
+  /** Highest-confidence detected object in the image (e.g. "bed", "couch") */
+  topLabel: string;
+};
+
+/**
+ * Top-5 room candidates per room type, ready to send to an LLM image picker.
+ * Empty array means no images were bucketed into that room type.
+ */
+export type TopRoomCandidatesMap = {
+  bedroom:     TopRoomCandidate[];
+  living_room: TopRoomCandidate[];
+  dining_room: TopRoomCandidate[];
+};
+
 // ─── Batch / Multi-product ────────────────────────────────────────────────────
 
 export type BatchProduct = {
   productId: string;
   imageUrl: string;
   productType: ProductType;
+  gender: UserGender;
 };
 
 export type BatchResult = {

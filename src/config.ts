@@ -1,5 +1,5 @@
 import { configError } from "./errors.js";
-import type { SDKConfig } from "./types.js";
+import type { PersonalizationMode, SDKConfig } from "./types.js";
 
 const DEFAULT_MAX_IMAGES = 80;
 const DEFAULT_POLL_INTERVAL_MS = 1500;
@@ -9,9 +9,10 @@ const DEFAULT_SELECTION_TTL_MS = 24 * 60 * 60 * 1000;      // 24 hours
 const DEFAULT_ACTIVE_JOB_MAX_AGE_MS = 5 * 60 * 1000;       // 5 minutes
 
 export type ResolvedConfig = Required<
-  Omit<SDKConfig, "auth" | "product" | "cache" | "rateLimit" | "analytics">
+  Omit<SDKConfig, "auth" | "product" | "cache" | "rateLimit" | "analytics" | "personalizationMode">
 > & {
   auth: SDKConfig["auth"];
+  personalizationMode: PersonalizationMode[];
   product: NonNullable<SDKConfig["product"]>;
   cache: {
     resultTtlMs: number;
@@ -28,6 +29,7 @@ export function resolveConfig(config: SDKConfig): ResolvedConfig {
 
   return {
     auth: config.auth,
+    personalizationMode: resolvePersonalizationMode(config.personalizationMode),
     product: {
       detectFromStructuredData: true,
       detectFromDom: true,
@@ -64,6 +66,20 @@ export function resolveConfig(config: SDKConfig): ResolvedConfig {
     pollIntervalMs: config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     pollMaxAttempts: config.pollMaxAttempts ?? DEFAULT_POLL_MAX_ATTEMPTS,
   };
+}
+
+/**
+ * Normalises personalizationMode into a consistent PersonalizationMode[].
+ * - undefined / "all"  → ["all"]
+ * - "fashion"          → ["fashion"]
+ * - ["fashion", "jewellery"] → ["fashion", "jewellery"]
+ */
+function resolvePersonalizationMode(
+  mode: SDKConfig["personalizationMode"],
+): PersonalizationMode[] {
+  if (!mode) return ["all"];
+  if (Array.isArray(mode)) return mode.length > 0 ? mode : ["all"];
+  return [mode];
 }
 
 function validateConfig(config: SDKConfig): void {

@@ -59,9 +59,18 @@ function normalizeError(e) {
 
 // src/api-client.ts
 var ENDPOINTS = {
+  // Person try-on (fashion, eyewear, footwear, makeup, accessories)
   submit: "/submit",
-  status: "/status"
+  status: "/status",
+  // Room generation (furniture, home decor)
+  generateRoom: "/api/gen/generate-room",
+  roomStatus: "/api/gen/status",
+  // Shared utilities
+  uploadImage: "/api/uploads/user-image",
+  profileSelect: "/api/profile/select",
+  roomSelect: "/api/room/select"
 };
+var EC_BASE_URL = "https://ec.gennoctua.com";
 var ApiClient = class {
   constructor(auth) {
     this.auth = auth;
@@ -148,6 +157,70 @@ var ApiClient = class {
       reader.releaseLock();
     }
   }
+  // ── Profile image upload ─────────────────────────────────────────────────────
+  /**
+   * Upload a user profile image to GCS via Gennoctua's upload endpoint.
+   * Returns the permanent public GCS URL.
+   * profileKey is used for GCS path organisation (e.g. the asset hash).
+   */
+  async uploadUserImage(blob, _profileKey) {
+    const headers = await this.auth.getHeaders();
+    const form = new FormData();
+    form.append("file", blob, "profile.jpg");
+    const url = `${EC_BASE_URL}${ENDPOINTS.uploadImage}`;
+    let res;
+    try {
+      res = await fetch(url, { method: "POST", headers, body: form });
+    } catch (e) {
+      throw networkError(`Profile upload failed: ${normalizeError(e).message}`);
+    }
+    const data = await this.parseResponse(res, ENDPOINTS.uploadImage);
+    const gcsUrl = typeof data.gcs_url === "string" ? data.gcs_url : null;
+    if (!gcsUrl) throw networkError("Upload endpoint did not return gcs_url");
+    return gcsUrl;
+  }
+  // ── LLM room refinement ─────────────────────────────────────────────────────
+  /**
+   * Send top-5 room candidates per room type to the Gennoctua LLM room selector.
+   * Returns which candidate ID was chosen per room type.
+   * Silently falls back if endpoint is unavailable.
+   */
+  async selectRoomsWithLLM(payload) {
+    const headers = await this.auth.getHeaders();
+    const url = `${EC_BASE_URL}${ENDPOINTS.roomSelect}`;
+    let res;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+    } catch (e) {
+      throw networkError(`LLM room select failed: ${normalizeError(e).message}`);
+    }
+    return await this.parseResponse(res, ENDPOINTS.roomSelect);
+  }
+  // ── LLM profile refinement ───────────────────────────────────────────────────
+  /**
+   * Send top-5 candidates per category to the Gennoctua LLM profile selector.
+   * Returns which candidate ID was chosen per category, plus full scoring.
+   * Silently falls back if endpoint is unavailable.
+   */
+  async selectProfilesWithLLM(payload) {
+    const headers = await this.auth.getHeaders();
+    const url = `${EC_BASE_URL}${ENDPOINTS.profileSelect}`;
+    let res;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+    } catch (e) {
+      throw networkError(`LLM profile select failed: ${normalizeError(e).message}`);
+    }
+    return await this.parseResponse(res, ENDPOINTS.profileSelect);
+  }
   // ── Response parser ─────────────────────────────────────────────────────────
   async parseResponse(res, path) {
     if (res.status === 401 || res.status === 403) {
@@ -181,5 +254,5 @@ var ApiClient = class {
 };
 
 export { ApiClient, ENDPOINTS, SDKError, cacheError, configError, jobFailedError, jobTimeoutError, normalizeError, rateLimitedError };
-//# sourceMappingURL=chunk-64OGGIDA.js.map
-//# sourceMappingURL=chunk-64OGGIDA.js.map
+//# sourceMappingURL=chunk-LT23N6M7.js.map
+//# sourceMappingURL=chunk-LT23N6M7.js.map

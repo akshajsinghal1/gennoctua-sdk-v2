@@ -6,6 +6,45 @@ import type { EventBus } from "./event-bus.js";
 import { jobFailedError, jobTimeoutError, normalizeError } from "./errors.js";
 import type { PersonalizationResult, ProductType, UserImageCategory } from "./types.js";
 
+// ─── Furniture product types ──────────────────────────────────────────────────
+
+const FURNITURE_PRODUCT_TYPES = new Set<ProductType>([
+  "bedroom_furniture",
+  "bathroom_furniture",
+  "living_room_furniture",
+  "dining_room_furniture",
+  "kitchen_furniture",
+  "home_decor",
+]);
+
+// ─── Room type string sent to /api/gen/generate-room ─────────────────────────
+// Maps UserImageCategory → room_type param expected by the backend.
+// "bathroom" falls back to generic furniture behaviour on the backend.
+
+const ROOM_TYPE_FROM_CATEGORY: Partial<Record<UserImageCategory, string>> = {
+  room_bedroom:      "bedroom",
+  room_living_room:  "living_room",
+  room_kitchen:      "kitchen",
+  room_dining_room:  "dining_room",
+  room_bathroom:     "bathroom",
+};
+
+// ─── Pose tag derived from user image category ────────────────────────────────
+// Sent as `tag` field in the job submit payload. Tells the backend how much of
+// the body is visible, so generation strategy can be adjusted accordingly.
+// 1 = full body  |  2 = partial (knees up)  |  3 = face / upper body only
+const POSE_TAG_FROM_CATEGORY: Partial<Record<UserImageCategory, string>> = {
+  male_full_body:      "1",
+  female_full_body:    "1",
+  kid_boy_full_body:   "1",
+  kid_girl_full_body:  "1",
+  male_face_closeup:   "3",
+  female_face_closeup: "3",
+  kid_boy_face_closeup:  "3",
+  kid_girl_face_closeup: "3",
+  // room_* categories intentionally omitted — no pose concept for furniture
+};
+
 // ─── Broad category sent to HyperPersona ─────────────────────────────────────
 
 const BROAD_CATEGORY: Record<ProductType, string> = {
@@ -24,6 +63,7 @@ const BROAD_CATEGORY: Record<ProductType, string> = {
   bedroom_furniture:      "accessories",
   bathroom_furniture:     "accessories",
   living_room_furniture:  "accessories",
+  dining_room_furniture:  "accessories",
   kitchen_furniture:      "accessories",
   home_decor:             "accessories",
 };
@@ -46,6 +86,7 @@ const PRODUCT_TYPE_LABEL: Record<ProductType, string> = {
   bedroom_furniture:      "bedroom furniture",
   bathroom_furniture:     "bathroom furniture",
   living_room_furniture:  "living room furniture",
+  dining_room_furniture:  "dining room furniture",
   kitchen_furniture:      "kitchen furniture",
   home_decor:             "home decor",
 };
@@ -78,6 +119,9 @@ export class PersonalizationService {
 
   async personalize(opts: {
     userImage: Blob;
+    /** Pre-uploaded GCS URL. When present, sent as user_image_url instead of
+     *  re-uploading the blob — saves bandwidth for large product catalogs. */
+    userImageUrl?: string;
     userImageHash: string;
     userImageCategory: UserImageCategory;
     productImageUrl: string;
@@ -88,6 +132,7 @@ export class PersonalizationService {
   }): Promise<PersonalizationResult> {
     const {
       userImage,
+      userImageUrl,
       userImageHash,
       userImageCategory,
       productImageUrl,
@@ -127,20 +172,59 @@ export class PersonalizationService {
     }
 
     // ── 3. Submit job if no active job ───────────────────────────────────────
-    if (!jobId) {
-      const form = new FormData();
-      form.append("user_image", userImage, "profile.jpg");
-      form.append("garment_image_url", productImageUrl);
-      form.append("product_type", PRODUCT_TYPE_LABEL[productType] ?? productType);
-      form.append("category", BROAD_CATEGORY[productType] ?? "accessories");
+    const { ENDPOINTS } = await import("./api-client.js");
+    const isFurniture = FURNITURE_PRODUCT_TYPES.has(productType);
 
+    if (!jobId) {
       if (abortSignal?.aborted) {
         this.bus.emit("personalization:cancelled", {});
         throw new Error("Cancelled");
       }
 
-      const { ENDPOINTS } = await import("./api-client.js");
-      const body = await this.api.post(ENDPOINTS.submit, form) as Record<string, unknown>;
+      const form = new FormData();
+      let submitPath: string;
+
+      if (isFurniture) {
+        // ── Room generation flow ─────────────────────────────────────────────
+        // POST /api/gen/generate-room
+        //   room_type      — derived from user image category
+        //   room_image     — room photo blob (or URL if pre-uploaded to GCS)
+        //   object_url     — furniture product image URL
+        const roomType = ROOM_TYPE_FROM_CATEGORY[userImageCategory] ?? "bedroom";
+        form.append("room_type", roomType);
+        if (userImageUrl) {
+          form.append("room_image_url", userImageUrl);
+        } else {
+          form.append("room_image", userImage, "room.jpg");
+        }
+        form.append("object_url", productImageUrl);
+        submitPath = ENDPOINTS.generateRoom;
+      } else {
+        // ── Person try-on flow ───────────────────────────────────────────────
+        // POST /submit (proxied to category-specific endpoint)
+        //   user_image        — person photo (always send blob — HP does not accept URLs)
+        //   garment_image_url — product image
+        //   product_type      — descriptive label
+        //   category          — broad category
+        //   tag               — pose score (body visibility)
+        form.append("user_image", userImage, "profile.jpg");
+        void userImageUrl; // GCS URL used only for profile LLM, not for HP submit
+        form.append("garment_image_url", productImageUrl);
+        form.append("product_type", PRODUCT_TYPE_LABEL[productType] ?? productType);
+        form.append("category", BROAD_CATEGORY[productType] ?? "accessories");
+
+        // tag = pose score — tells backend how much body is visible.
+        //   1 = full body (ankles visible) — best for clothing/footwear
+        //   3 = face / upper body only
+        // Room photos carry no tag.
+        const poseTag = POSE_TAG_FROM_CATEGORY[userImageCategory];
+        if (poseTag !== undefined) {
+          form.append("tag", poseTag);
+        }
+        submitPath = ENDPOINTS.submit;
+      }
+
+      const body = await this.api.post(submitPath, form) as Record<string, unknown>;
       jobId = typeof body.job_id === "string" ? body.job_id : null;
       if (!jobId) throw jobFailedError({ response: body });
 
@@ -152,8 +236,10 @@ export class PersonalizationService {
     // ── 4. Stream SSE until COMPLETED or FAILED ──────────────────────────────
     this.bus.emit("personalization:polling_started", { jobId });
 
-    const { ENDPOINTS } = await import("./api-client.js");
-    const statusPath = `${ENDPOINTS.status}/${jobId}`;
+    // Furniture jobs use a different status path than person try-on jobs
+    const statusPath = isFurniture
+      ? `${ENDPOINTS.roomStatus}/${jobId}`
+      : `${ENDPOINTS.status}/${jobId}`;
 
     return new Promise((resolve, reject) => {
       let settled = false;

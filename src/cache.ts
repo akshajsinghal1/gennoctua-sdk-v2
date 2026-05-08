@@ -31,6 +31,15 @@ type SelectedImagesRecord = {
   ttlMs: number;
 };
 
+type ProfileRecord = {
+  key: string;
+  assets: SelectedImageAsset[];
+  /** hash → GCS URL, populated as background uploads complete */
+  profileUrls: Record<string, string>;
+  cachedAt: number;
+  ttlMs: number;
+};
+
 // ─── CacheService ─────────────────────────────────────────────────────────────
 
 export class CacheService {
@@ -216,6 +225,64 @@ export class CacheService {
 
   async clearActiveJob(key: string): Promise<void> {
     await this.idbDelete(STORE.active_jobs, key);
+  }
+
+  // ── Profile cache ───────────────────────────────────────────────────────────
+  // Persists selected assets (blobs stored natively in IndexedDB — no base64
+  // conversion needed) + GCS URLs so returning users skip the AI pipeline.
+
+  profileKey(orgId: string): string {
+    return `${orgId}:profile`;
+  }
+
+  async saveProfile(
+    orgId: string,
+    assets: SelectedImageAsset[],
+    profileUrls: Record<string, string>,
+    ttlMs: number,
+  ): Promise<void> {
+    await this.idbPut(STORE.selected_images, {
+      key: this.profileKey(orgId),
+      assets,
+      profileUrls,
+      cachedAt: Date.now(),
+      ttlMs,
+    });
+  }
+
+  async loadProfile(
+    orgId: string,
+  ): Promise<{ assets: SelectedImageAsset[]; profileUrls: Record<string, string> } | null> {
+    const record = await this.idbGet<ProfileRecord>(
+      STORE.selected_images,
+      this.profileKey(orgId),
+    );
+    if (!record) return null;
+    if (Date.now() - record.cachedAt > record.ttlMs) {
+      await this.idbDelete(STORE.selected_images, record.key);
+      return null;
+    }
+    return { assets: record.assets, profileUrls: record.profileUrls ?? {} };
+  }
+
+  /**
+   * Patch GCS URLs into an existing profile record without rewriting the blobs.
+   * Called incrementally as background uploads complete.
+   */
+  async updateProfileUrls(orgId: string, profileUrls: Record<string, string>): Promise<void> {
+    const record = await this.idbGet<ProfileRecord>(
+      STORE.selected_images,
+      this.profileKey(orgId),
+    );
+    if (!record) return; // profile was cleared or expired — skip
+    await this.idbPut(STORE.selected_images, {
+      ...record,
+      profileUrls: { ...record.profileUrls, ...profileUrls },
+    });
+  }
+
+  async clearProfile(orgId: string): Promise<void> {
+    await this.idbDelete(STORE.selected_images, this.profileKey(orgId));
   }
 
   // ── Public clear APIs ───────────────────────────────────────────────────────

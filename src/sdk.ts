@@ -8,9 +8,11 @@ import { EventBus } from "./event-bus.js";
 import { DebugService } from "./debug.js";
 import { ProductContextService } from "./product-context.js";
 import { PersonalizationService } from "./personalization.js";
-import { selectImages, type SelectionProgress } from "./selection.js";
+import { selectImages, type SelectionProgress, type TopCandidatesMap, type TopCandidate } from "./selection.js";
+import type { LLMCandidate, LLMRoomCandidate } from "./api-client.js";
+import type { TopRoomCandidatesMap } from "./types.js";
 import { FallbackTaggingService } from "./tagging.js";
-import { checkEligibility } from "./mapping.js";
+import { checkEligibility, resolveCategoryFromGender } from "./mapping.js";
 import { normalizeError, rateLimitedError } from "./errors.js";
 import type {
   SDKConfig,
@@ -18,6 +20,7 @@ import type {
   SDKEventMap,
   ProductContext,
   ProductType,
+  UserGender,
   SelectionSummary,
   EligibilityResult,
   PersonalizationResult,
@@ -51,6 +54,9 @@ export class PersonalizeSDK {
   private currentProductContext: ProductContext | null = null;
   private viewMode: ViewMode = "original";
   private activeAbortController: AbortController | null = null;
+
+  /** GCS URLs keyed by asset hash — populated in background after ingestImages() */
+  private profileUrlCache = new Map<string, string>();
 
   private constructor(
     config: ResolvedConfig,
@@ -101,11 +107,20 @@ export class PersonalizeSDK {
     this.dbg.log("ingest_images", { fileCount });
 
     let assets: SelectedImageAsset[];
+    let topCandidates: TopCandidatesMap;
+    let topRoomCandidates: TopRoomCandidatesMap;
     try {
-      assets = await selectImages(fileList, (p) => {
-        onProgress?.(p);
-        this.bus.emit("selection:started", { fileCount });
-      });
+      const output = await selectImages(
+        fileList,
+        (p) => {
+          onProgress?.(p);
+          this.bus.emit("selection:started", { fileCount });
+        },
+        this.config.personalizationMode,
+      );
+      assets = output.assets;
+      topCandidates = output.topCandidates;
+      topRoomCandidates = output.topRoomCandidates;
     } catch (e) {
       const err = normalizeError(e);
       this.bus.emit("upload:failed", { error: err.message });
@@ -115,11 +130,24 @@ export class PersonalizeSDK {
 
     // Run fallback tagging if needed (silently skips if rate limited or API unavailable)
     const allCategories: UserImageCategory[] = [
-      "male_full_body", "female_full_body", "child_full_body",
-      "male_face_closeup", "female_face_closeup", "child_face_closeup",
+      // Person — fashion try-on
+      "male_full_body", "female_full_body", "kid_boy_full_body", "kid_girl_full_body",
+      "male_face_closeup", "female_face_closeup", "kid_boy_face_closeup", "kid_girl_face_closeup",
+      // Room — furniture & home decor try-on
+      "room_bedroom", "room_living_room", "room_dining_room", "room_kitchen", "room_bathroom",
     ];
-    const taggedAssets = await this.taggingSvc.maybeTag(assets, allCategories);
+    let taggedAssets = await this.taggingSvc.maybeTag(assets, allCategories);
+
+    // Optional LLM refinement for person photos
+    taggedAssets = await this.refineSelectionWithLLM(taggedAssets, topCandidates);
+
+    // Optional LLM refinement for room photos
+    taggedAssets = await this.refineRoomsWithLLM(taggedAssets, topRoomCandidates);
+
     this.selectedAssets = taggedAssets;
+
+    // Pre-upload profiles to GCS in background — no await, won't block the caller
+    void this.uploadProfilesInBackground(taggedAssets);
 
     const available = [...new Set(taggedAssets.map((a) => a.category))];
     const missing = allCategories.filter((c) => !available.includes(c));
@@ -136,7 +164,74 @@ export class PersonalizeSDK {
     this.bus.emit("selection:completed", this.selectionSummary);
     this.dbg.setSelectionSummary(this.selectionSummary, null);
 
+    // Persist profile so returning users skip the AI pipeline entirely.
+    // Blobs are stored natively in IndexedDB — no base64 conversion needed.
+    // GCS URLs are patched in incrementally as background uploads complete.
+    void this.cacheService.saveProfile(
+      this.orgId,
+      taggedAssets,
+      Object.fromEntries(this.profileUrlCache),
+      this.config.cache.selectionTtlMs,
+    ).catch(() => { /* ignore cache errors */ });
+
     return this.selectionSummary;
+  }
+
+  // ── Profile restore ─────────────────────────────────────────────────────────
+
+  /**
+   * Restore a previously selected profile from cache.
+   * Call this on page load — if a cached profile exists, the user can skip
+   * the upload step entirely and go straight to personalization.
+   *
+   * Returns the SelectionSummary if a valid cached profile was found,
+   * or null if no cache exists / cache has expired.
+   */
+  async restoreProfile(): Promise<SelectionSummary | null> {
+    try {
+      const cached = await this.cacheService.loadProfile(this.orgId);
+      if (!cached || cached.assets.length === 0) return null;
+
+      this.selectedAssets = cached.assets;
+
+      // Restore GCS URL cache so personalize() avoids re-uploading blobs
+      for (const [hash, url] of Object.entries(cached.profileUrls)) {
+        this.profileUrlCache.set(hash, url);
+      }
+
+      // Re-upload any assets that don't have a GCS URL yet
+      // (e.g. user left the page before background upload finished)
+      const missingUploads = cached.assets.filter(
+        (a) => !this.profileUrlCache.has(a.hash),
+      );
+      if (missingUploads.length > 0) {
+        void this.uploadProfilesInBackground(missingUploads);
+      }
+
+      const allCategories: UserImageCategory[] = [
+        "male_full_body", "female_full_body", "kid_boy_full_body", "kid_girl_full_body",
+        "male_face_closeup", "female_face_closeup", "kid_boy_face_closeup", "kid_girl_face_closeup",
+        "room_bedroom", "room_living_room", "room_dining_room", "room_kitchen", "room_bathroom",
+      ];
+
+      const available = [...new Set(cached.assets.map((a) => a.category))];
+      const missing = allCategories.filter((c) => !available.includes(c));
+
+      this.selectionSummary = {
+        availableCategories: available,
+        missingCategories: missing,
+        totalUploaded: 0,   // unknown on restore
+        totalSelected: cached.assets.length,
+      };
+
+      this.dbg.setSelectionSummary(this.selectionSummary, null);
+      this.bus.emit("selection:completed", this.selectionSummary);
+      this.dbg.log("profile_restored", { categories: available });
+
+      return this.selectionSummary;
+    } catch {
+      return null; // cache unavailable — caller should show upload UI
+    }
   }
 
   // ── Product context ─────────────────────────────────────────────────────────
@@ -180,28 +275,44 @@ export class PersonalizeSDK {
 
   // ── Single-product personalization ─────────────────────────────────────────
 
-  async personalize(overrides?: {
-    imageUrl?: string;
-    productType?: ProductType;
+  async personalize(opts: {
+    imageUrl: string;
+    productType: ProductType;
+    /** Required for all person products. Determines which profile photo is used.
+     *  Ignored for furniture / room products. */
+    gender: UserGender;
     productId?: string;
+    abortSignal?: AbortSignal;
   }): Promise<PersonalizationResult> {
-    // Resolve product context
-    const ctx = overrides
-      ? await this.resolveProduct(overrides)
-      : (this.currentProductContext ?? await this.resolveProduct());
+    const { imageUrl, productType, gender, productId } = opts;
 
-    // Check eligibility
-    const eligibility = await this.getEligibility(ctx.productType);
-    if (!eligibility.eligible) {
-      throw normalizeError(
-        new Error(
-          `Product not eligible for personalization: ${eligibility.reason}`,
-        ),
-      );
+    // Resolve product context
+    const ctx = await this.resolveProduct({ imageUrl, productType, productId });
+
+    // Resolve required user image category from gender + productType
+    const resolvedCategory = resolveCategoryFromGender(ctx.productType, gender);
+
+    let requiredCategory: UserImageCategory;
+
+    if (resolvedCategory === null) {
+      // Furniture / room product — use standard eligibility check
+      const eligibility = await this.getEligibility(ctx.productType);
+      if (!eligibility.eligible) {
+        throw normalizeError(new Error(`Product not eligible for personalization: ${eligibility.reason}`));
+      }
+      requiredCategory = eligibility.requiredCategory;
+    } else {
+      // Person product — use gender to pick exact category
+      requiredCategory = resolvedCategory;
+      const hasCategory = this.selectionSummary?.availableCategories.includes(requiredCategory);
+      if (!hasCategory) {
+        throw normalizeError(new Error(
+          `No ${requiredCategory} photo found. Upload a ${gender} photo first.`,
+        ));
+      }
     }
 
     // Find the matching user image asset
-    const requiredCategory = eligibility.requiredCategory;
     const asset = this.selectedAssets.find((a) => a.category === requiredCategory);
     if (!asset) {
       throw normalizeError(new Error(`No asset found for category ${requiredCategory}`));
@@ -227,13 +338,17 @@ export class PersonalizeSDK {
 
     // Set up cancellation
     this.activeAbortController = new AbortController();
+    if (opts.abortSignal) {
+      opts.abortSignal.addEventListener("abort", () => this.activeAbortController?.abort());
+    }
 
     const promise = this.personalizationSvc.personalize({
       userImage: asset.blob,
+      userImageUrl: this.profileUrlCache.get(asset.hash),
       userImageHash: asset.hash,
       userImageCategory: asset.category,
       productImageUrl: ctx.image.imageUrl,
-      productImageHash: ctx.image.imageUrl, // URL used as hash for product images
+      productImageHash: ctx.image.imageUrl,
       productType: ctx.productType,
       productId: ctx.productId,
       abortSignal: this.activeAbortController.signal,
@@ -269,25 +384,39 @@ export class PersonalizeSDK {
   ): Promise<BatchResult[]> {
     const results = await Promise.allSettled(
       products.map(async (p): Promise<BatchResult> => {
-        const eligibility = checkEligibility(p.productType, this.selectionSummary);
-        if (!eligibility.eligible) {
-          return {
-            productId: p.productId,
-            status: "ineligible",
-            reason: eligibility.reason,
-          };
+        // Resolve category from gender (person) or productType (furniture)
+        const resolvedCategory = resolveCategoryFromGender(p.productType, p.gender);
+        let requiredCategory: UserImageCategory;
+
+        if (resolvedCategory === null) {
+          const eligibility = checkEligibility(p.productType, this.selectionSummary);
+          if (!eligibility.eligible) {
+            const r: BatchResult = { productId: p.productId, status: "ineligible", reason: eligibility.reason };
+            onResult?.(r);
+            return r;
+          }
+          requiredCategory = (eligibility as EligibilityResult & { eligible: true }).requiredCategory;
+        } else {
+          requiredCategory = resolvedCategory;
+          const hasCategory = this.selectionSummary?.availableCategories.includes(requiredCategory);
+          if (!hasCategory) {
+            const r: BatchResult = { productId: p.productId, status: "ineligible", reason: "REQUIRED_USER_IMAGE_MISSING" };
+            onResult?.(r);
+            return r;
+          }
         }
 
-        const asset = this.selectedAssets.find(
-          (a) => a.category === (eligibility as EligibilityResult & { eligible: true }).requiredCategory,
-        );
+        const asset = this.selectedAssets.find((a) => a.category === requiredCategory);
         if (!asset) {
-          return { productId: p.productId, status: "ineligible", reason: "REQUIRED_USER_IMAGE_MISSING" };
+          const r: BatchResult = { productId: p.productId, status: "ineligible", reason: "REQUIRED_USER_IMAGE_MISSING" };
+          onResult?.(r);
+          return r;
         }
 
         try {
           const result = await this.personalizationSvc.personalize({
             userImage: asset.blob,
+            userImageUrl: this.profileUrlCache.get(asset.hash),
             userImageHash: asset.hash,
             userImageCategory: asset.category,
             productImageUrl: p.imageUrl,
@@ -362,6 +491,7 @@ export class PersonalizeSDK {
   // ── Cache ───────────────────────────────────────────────────────────────────
 
   cache = {
+    clearProfile: () => this.cacheService.clearProfile(this.orgId),
     clearSelection: () => this.cacheService.clearSelection(),
     clearPersonalization: () => this.cacheService.clearPersonalization(),
     clearAll: () => this.cacheService.clearAll(),
@@ -385,6 +515,267 @@ export class PersonalizeSDK {
 
   // ── Cancel + Reset ───────────────────────────────────────────────────────────
 
+  // ── Private: GCS profile pre-upload ────────────────────────────────────────
+
+  /**
+   * Upload each unique selected asset to GCS in the background.
+   * When a product submission fires later, profileUrlCache will already have
+   * the URL — so we send user_image_url instead of re-uploading the blob.
+   * Silent on failure: personalize() falls back to raw blob upload.
+   */
+  private uploadProfilesInBackground(assets: SelectedImageAsset[]): void {
+    const seen = new Set<string>();
+    for (const asset of assets) {
+      if (seen.has(asset.hash) || this.profileUrlCache.has(asset.hash)) continue;
+      seen.add(asset.hash);
+      void (async () => {
+        try {
+          const url = await this.api.uploadUserImage(asset.blob, asset.hash);
+          this.profileUrlCache.set(asset.hash, url);
+          this.dbg.log("profile_upload_ok", { hash: asset.hash });
+          // Patch the new GCS URL into the persisted profile record
+          void this.cacheService.updateProfileUrls(this.orgId, { [asset.hash]: url })
+            .catch(() => { /* ignore */ });
+        } catch (e) {
+          this.dbg.log("profile_upload_failed", { hash: asset.hash, error: normalizeError(e).message });
+          // Silently ignored — personalize() will fall back to raw blob
+        }
+      })();
+    }
+  }
+
+  // ── Private: LLM profile refinement ────────────────────────────────────────
+
+  /**
+   * Optionally refine the local-AI selection using the Gennoctua LLM picker.
+   * Compresses top-5 candidates per category to 512px, sends to /api/profile/select,
+   * and swaps out any asset where the LLM found a better pick.
+   * Falls back silently to the original assets on any error or timeout.
+   */
+  private async refineSelectionWithLLM(
+    assets: SelectedImageAsset[],
+    topCandidates: TopCandidatesMap,
+  ): Promise<SelectedImageAsset[]> {
+    const hasAnyCandidates = Object.values(topCandidates).some(arr => arr.length > 0);
+    if (!hasAnyCandidates) return assets;
+
+    try {
+      // Compress each candidate to 512px data URL for LLM vision
+      const compress = (file: File): Promise<string> =>
+        new Promise((resolve, reject) => {
+          const img = new Image();
+          const objectUrl = URL.createObjectURL(file);
+          img.onload = () => {
+            URL.revokeObjectURL(objectUrl);
+            const maxSide = 512;
+            const scale = Math.min(1, maxSide / Math.max(img.naturalWidth, img.naturalHeight));
+            const w = Math.max(1, Math.round(img.naturalWidth * scale));
+            const h = Math.max(1, Math.round(img.naturalHeight * scale));
+            const canvas = document.createElement("canvas");
+            canvas.width = w; canvas.height = h;
+            canvas.getContext("2d")!.drawImage(img, 0, 0, w, h);
+            resolve(canvas.toDataURL("image/jpeg", 0.8));
+          };
+          img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error("compress failed")); };
+          img.src = objectUrl;
+        });
+
+      // Build ID → TopCandidate lookup for mapping LLM result back to files
+      const idToCandidate = new Map<string, TopCandidate>();
+
+      const buildPayload = async (
+        cat: keyof TopCandidatesMap,
+        gender: "male" | "female" | "unknown",
+      ): Promise<LLMCandidate[]> => {
+        const result: LLMCandidate[] = [];
+        for (let i = 0; i < topCandidates[cat].length; i++) {
+          const c = topCandidates[cat][i];
+          const id = `${cat}_${i}`;
+          idToCandidate.set(id, c);
+          const imageDataUrl = await compress(c.file).catch(() => "");
+          if (!imageDataUrl) continue;
+          result.push({
+            id,
+            imageDataUrl,
+            poseScore: c.poseRank,
+            faceCount: 1,
+            photoName: c.file.name,
+            detectedGender: gender,
+            detectedAge: Math.round(c.age),
+          });
+        }
+        return result;
+      };
+
+      const [male, female, kid_boy, kid_girl] = await Promise.all([
+        buildPayload("male",    "male"),
+        buildPayload("female",  "female"),
+        buildPayload("kid_boy", "male"),
+        buildPayload("kid_girl","female"),
+      ]);
+
+      const llmResult = await this.api.selectProfilesWithLLM({ categories: { male, female, kid_boy, kid_girl } });
+
+      if (llmResult.skipped) return assets;
+
+      // Map LLM picks back to SelectedImageAssets
+      const updatedAssets = [...assets];
+
+      for (const [catKey, selectedId] of Object.entries(llmResult.selected) as [keyof typeof llmResult.selected, string | null][]) {
+        if (!selectedId) continue;
+        const candidate = idToCandidate.get(selectedId);
+        if (!candidate) continue;
+
+        const newHash = candidate.hash;
+
+        // Determine which categories this pick applies to
+        const targetCategories: UserImageCategory[] =
+          catKey === "kid_boy"  ? ["kid_boy_full_body",  "kid_boy_face_closeup"]
+        : catKey === "kid_girl" ? ["kid_girl_full_body", "kid_girl_face_closeup"]
+        : catKey === "male"     ? ["male_full_body",     "male_face_closeup"]
+        :                         ["female_full_body",   "female_face_closeup"];
+
+        for (const targetCat of targetCategories) {
+          const idx = updatedAssets.findIndex(a => a.category === targetCat);
+          if (idx === -1) continue;
+
+          // Only replace full_body if candidate actually has a pose rank (standing photo)
+          if ((targetCat === "male_full_body" || targetCat === "female_full_body" ||
+               targetCat === "kid_boy_full_body" || targetCat === "kid_girl_full_body")
+              && candidate.poseRank === 0) {
+            continue; // LLM picked a selfie — don't use it for full body
+          }
+
+          updatedAssets[idx] = {
+            ...updatedAssets[idx],
+            imageId: newHash,
+            blob: candidate.file,
+            hash: newHash,
+            source: "merged",
+          };
+        }
+      }
+
+      this.dbg.log("llm_profile_refinement_ok", { model: llmResult.model });
+      return updatedAssets;
+    } catch (e) {
+      const err = normalizeError(e);
+      this.dbg.log("llm_profile_refinement_failed", { error: err.message, details: err.details });
+      return assets; // silent fallback to local AI picks
+    }
+  }
+
+  // ── Private: LLM room refinement ───────────────────────────────────────────
+
+  /**
+   * Optionally refine the YOLO room selection using the Gennoctua LLM room picker.
+   * Compresses top-5 candidates per room type to 512px, sends to /api/room/select,
+   * and swaps out any asset where the LLM found a better pick.
+   * Falls back silently to the original YOLO picks on any error or timeout.
+   */
+  private async refineRoomsWithLLM(
+    assets: SelectedImageAsset[],
+    topRoomCandidates: TopRoomCandidatesMap,
+  ): Promise<SelectedImageAsset[]> {
+    const hasAnyCandidates =
+      topRoomCandidates.bedroom.length > 0 ||
+      topRoomCandidates.living_room.length > 0 ||
+      topRoomCandidates.dining_room.length > 0;
+    if (!hasAnyCandidates) return assets;
+
+    try {
+      // Compress each candidate to 512px data URL for LLM vision
+      const compress = (file: File): Promise<string> =>
+        new Promise((resolve, reject) => {
+          const img = new Image();
+          const objectUrl = URL.createObjectURL(file);
+          img.onload = () => {
+            URL.revokeObjectURL(objectUrl);
+            const scale = Math.min(1, 512 / Math.max(img.width, img.height));
+            const w = Math.round(img.width * scale);
+            const h = Math.round(img.height * scale);
+            const canvas = document.createElement("canvas");
+            canvas.width = w; canvas.height = h;
+            canvas.getContext("2d")!.drawImage(img, 0, 0, w, h);
+            resolve(canvas.toDataURL("image/jpeg", 0.82));
+          };
+          img.onerror = () => { URL.revokeObjectURL(objectUrl); reject(new Error("compress failed")); };
+          img.src = objectUrl;
+        });
+
+      // Build ID → file lookup for mapping LLM result back to files
+      type RoomKey = keyof TopRoomCandidatesMap;
+      const idToFile = new Map<string, File>();
+
+      const buildPayload = async (roomKey: RoomKey): Promise<LLMRoomCandidate[]> => {
+        const result: LLMRoomCandidate[] = [];
+        for (let i = 0; i < topRoomCandidates[roomKey].length; i++) {
+          const c = topRoomCandidates[roomKey][i];
+          const id = `${roomKey}_${i}`;
+          idToFile.set(id, c.file);
+          const imageDataUrl = await compress(c.file).catch(() => "");
+          if (!imageDataUrl) continue;
+          result.push({ id, imageDataUrl, yoloScore: c.yoloScore, topLabel: c.topLabel });
+        }
+        return result;
+      };
+
+      const [bedroom, living_room, dining_room] = await Promise.all([
+        buildPayload("bedroom"),
+        buildPayload("living_room"),
+        buildPayload("dining_room"),
+      ]);
+
+      const llmResult = await this.api.selectRoomsWithLLM({ categories: { bedroom, living_room, dining_room } });
+
+      if (llmResult.skipped) return assets;
+
+      // Map LLM picks back to SelectedImageAssets
+      const updatedAssets = [...assets];
+
+      const roomKeyToCategory: Record<RoomKey, UserImageCategory> = {
+        bedroom:     "room_bedroom",
+        living_room: "room_living_room",
+        dining_room: "room_dining_room",
+      };
+
+      for (const [roomKey, selectedId] of Object.entries(llmResult.selected) as [RoomKey, string | null][]) {
+        const targetCat = roomKeyToCategory[roomKey];
+
+        if (!selectedId) {
+          // LLM rejected all candidates for this room type — remove the YOLO false positive.
+          // Only act if we actually sent candidates (empty array = LLM had nothing to judge).
+          if (topRoomCandidates[roomKey].length > 0) {
+            const idx = updatedAssets.findIndex(a => a.category === targetCat);
+            if (idx !== -1) updatedAssets.splice(idx, 1);
+          }
+          continue;
+        }
+
+        const file = idToFile.get(selectedId);
+        if (!file) continue;
+
+        const idx = updatedAssets.findIndex(a => a.category === targetCat);
+        if (idx === -1) continue;
+
+        const newHash = `${file.name}-${file.size}-${file.lastModified}`;
+        updatedAssets[idx] = {
+          ...updatedAssets[idx],
+          imageId: newHash,
+          blob: file,
+          hash: newHash,
+          source: "merged",
+        };
+      }
+
+      this.dbg.log("llm_room_refinement_ok", { model: llmResult.model });
+      return updatedAssets;
+    } catch (e) {
+      this.dbg.log("llm_room_refinement_failed", { error: normalizeError(e).message });
+      return assets; // silent fallback to YOLO picks
+    }
+  }
+
   cancel(): void {
     this.activeAbortController?.abort();
     this.activeAbortController = null;
@@ -395,6 +786,7 @@ export class PersonalizeSDK {
     this.cancel();
     this.selectedAssets = [];
     this.selectionSummary = null;
+    this.profileUrlCache.clear();
     this.currentProductContext = null;
     this.viewMode = "original";
     this.rateLimit.reset();
@@ -402,6 +794,8 @@ export class PersonalizeSDK {
     this.dbg.setSelectionSummary(null, null);
     this.dbg.setEligibility(null);
     this.dbg.setPersonalizationState("idle");
+    // Clear persisted profile so next page load shows upload UI
+    void this.cacheService.clearProfile(this.orgId).catch(() => {});
   }
 }
 
