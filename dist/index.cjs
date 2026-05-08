@@ -80,7 +80,7 @@ __export(api_client_exports, {
   ApiClient: () => ApiClient,
   ENDPOINTS: () => ENDPOINTS
 });
-var ENDPOINTS, EC_BASE_URL, ApiClient;
+var ENDPOINTS, ApiClient;
 var init_api_client = __esm({
   "src/api-client.ts"() {
     init_errors();
@@ -96,7 +96,6 @@ var init_api_client = __esm({
       profileSelect: "/api/profile/select",
       roomSelect: "/api/room/select"
     };
-    EC_BASE_URL = "https://ec.gennoctua.com";
     ApiClient = class {
       constructor(auth) {
         this.auth = auth;
@@ -193,7 +192,7 @@ var init_api_client = __esm({
         const headers = await this.auth.getHeaders();
         const form = new FormData();
         form.append("file", blob, "profile.jpg");
-        const url = `${EC_BASE_URL}${ENDPOINTS.uploadImage}`;
+        const url = `${this.auth.getProxyUrl()}${ENDPOINTS.uploadImage}`;
         let res;
         try {
           res = await fetch(url, { method: "POST", headers, body: form });
@@ -213,7 +212,7 @@ var init_api_client = __esm({
        */
       async selectRoomsWithLLM(payload) {
         const headers = await this.auth.getHeaders();
-        const url = `${EC_BASE_URL}${ENDPOINTS.roomSelect}`;
+        const url = `${this.auth.getProxyUrl()}${ENDPOINTS.roomSelect}`;
         let res;
         try {
           res = await fetch(url, {
@@ -234,7 +233,7 @@ var init_api_client = __esm({
        */
       async selectProfilesWithLLM(payload) {
         const headers = await this.auth.getHeaders();
-        const url = `${EC_BASE_URL}${ENDPOINTS.profileSelect}`;
+        const url = `${this.auth.getProxyUrl()}${ENDPOINTS.profileSelect}`;
         let res;
         try {
           res = await fetch(url, {

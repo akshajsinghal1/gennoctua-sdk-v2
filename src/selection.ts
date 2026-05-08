@@ -32,8 +32,6 @@ const POSE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_lan
 
 const MAX_IMAGES = 80;
 
-/** Direct Gennoctua compute URL — used for profile upload + LLM refinement */
-export const EC_BASE_URL = "https://ec.gennoctua.com";
 
 // ─── Pose Thresholds (ported from westside production) ────────────────────────
 

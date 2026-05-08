@@ -1,5 +1,5 @@
-import { ApiClient, normalizeError, cacheError, rateLimitedError, SDKError, jobFailedError, jobTimeoutError, configError } from './chunk-LT23N6M7.js';
-export { SDKError } from './chunk-LT23N6M7.js';
+import { ApiClient, normalizeError, cacheError, rateLimitedError, SDKError, jobFailedError, jobTimeoutError, configError } from './chunk-SSHR5MB7.js';
+export { SDKError } from './chunk-SSHR5MB7.js';
 
 // src/config.ts
 var DEFAULT_MAX_IMAGES = 80;
@@ -914,7 +914,7 @@ var PersonalizationService = class {
         console.info(`[personalize-sdk] Restoring active job ${jobId}`);
       }
     }
-    const { ENDPOINTS } = await import('./api-client-IB7JSRR5.js');
+    const { ENDPOINTS } = await import('./api-client-W2UV2HEY.js');
     const isFurniture = FURNITURE_PRODUCT_TYPES.has(productType);
     if (!jobId) {
       if (abortSignal?.aborted) {

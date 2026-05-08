@@ -67,8 +67,6 @@ export const ENDPOINTS = {
   roomSelect:     "/api/room/select",
 } as const;
 
-// Gennoctua compute backend — used for profile upload + LLM refinement
-const EC_BASE_URL = "https://ec.gennoctua.com";
 
 export class ApiClient {
   private auth: AuthService;
@@ -192,7 +190,7 @@ export class ApiClient {
     const headers = await this.auth.getHeaders();
     const form = new FormData();
     form.append("file", blob, "profile.jpg");
-    const url = `${EC_BASE_URL}${ENDPOINTS.uploadImage}`;
+    const url = `${this.auth.getProxyUrl()}${ENDPOINTS.uploadImage}`;
 
     let res: Response;
     try {
@@ -222,7 +220,7 @@ export class ApiClient {
     };
   }): Promise<LLMRoomSelectResult> {
     const headers = await this.auth.getHeaders();
-    const url = `${EC_BASE_URL}${ENDPOINTS.roomSelect}`;
+    const url = `${this.auth.getProxyUrl()}${ENDPOINTS.roomSelect}`;
 
     let res: Response;
     try {
@@ -254,7 +252,7 @@ export class ApiClient {
     };
   }): Promise<LLMProfileResult> {
     const headers = await this.auth.getHeaders();
-    const url = `${EC_BASE_URL}${ENDPOINTS.profileSelect}`;
+    const url = `${this.auth.getProxyUrl()}${ENDPOINTS.profileSelect}`;
 
     let res: Response;
     try {

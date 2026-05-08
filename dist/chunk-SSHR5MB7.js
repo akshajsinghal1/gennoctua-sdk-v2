@@ -70,7 +70,6 @@ var ENDPOINTS = {
   profileSelect: "/api/profile/select",
   roomSelect: "/api/room/select"
 };
-var EC_BASE_URL = "https://ec.gennoctua.com";
 var ApiClient = class {
   constructor(auth) {
     this.auth = auth;
@@ -167,7 +166,7 @@ var ApiClient = class {
     const headers = await this.auth.getHeaders();
     const form = new FormData();
     form.append("file", blob, "profile.jpg");
-    const url = `${EC_BASE_URL}${ENDPOINTS.uploadImage}`;
+    const url = `${this.auth.getProxyUrl()}${ENDPOINTS.uploadImage}`;
     let res;
     try {
       res = await fetch(url, { method: "POST", headers, body: form });
@@ -187,7 +186,7 @@ var ApiClient = class {
    */
   async selectRoomsWithLLM(payload) {
     const headers = await this.auth.getHeaders();
-    const url = `${EC_BASE_URL}${ENDPOINTS.roomSelect}`;
+    const url = `${this.auth.getProxyUrl()}${ENDPOINTS.roomSelect}`;
     let res;
     try {
       res = await fetch(url, {
@@ -208,7 +207,7 @@ var ApiClient = class {
    */
   async selectProfilesWithLLM(payload) {
     const headers = await this.auth.getHeaders();
-    const url = `${EC_BASE_URL}${ENDPOINTS.profileSelect}`;
+    const url = `${this.auth.getProxyUrl()}${ENDPOINTS.profileSelect}`;
     let res;
     try {
       res = await fetch(url, {
@@ -254,5 +253,5 @@ var ApiClient = class {
 };
 
 export { ApiClient, ENDPOINTS, SDKError, cacheError, configError, jobFailedError, jobTimeoutError, normalizeError, rateLimitedError };
-//# sourceMappingURL=chunk-LT23N6M7.js.map
-//# sourceMappingURL=chunk-LT23N6M7.js.map
+//# sourceMappingURL=chunk-SSHR5MB7.js.map
+//# sourceMappingURL=chunk-SSHR5MB7.js.map
