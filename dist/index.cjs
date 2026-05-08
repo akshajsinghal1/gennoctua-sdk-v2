@@ -1249,6 +1249,55 @@ var PersonalizationService = class {
         void this.cache.clearActiveJob(activeJobKey);
         reject(jobTimeoutError(this.config.pollMaxAttempts));
       }, timeoutMs);
+      if (isFurniture) {
+        const pollFurnitureStatus = async () => {
+          while (!settled) {
+            if (abortSignal?.aborted) {
+              settled = true;
+              clearTimeout(timeoutHandle);
+              await this.cache.clearActiveJob(activeJobKey);
+              this.bus.emit("personalization:cancelled", { jobId: jobId ?? void 0 });
+              reject(new Error("Cancelled"));
+              return;
+            }
+            try {
+              const raw = await this.api.get(statusPath);
+              const latest = Array.isArray(raw) ? raw[raw.length - 1] : raw;
+              const data = latest && typeof latest === "object" && "data" in latest ? latest.data : null;
+              const status = typeof data?.status === "string" ? data.status : void 0;
+              const outputUrl = typeof data?.output_url === "string" ? data.output_url : void 0;
+              const errorMessage = typeof data?.error === "string" && data.error.trim().length ? data.error : "Try-on job failed on server";
+              if (status === "COMPLETED" && outputUrl) {
+                settled = true;
+                clearTimeout(timeoutHandle);
+                const clean = `${outputUrl.split("?")[0]}?t=${Date.now()}`;
+                await this.cache.setResult(cacheKey, clean, this.config.cache.resultTtlMs);
+                await this.cache.clearActiveJob(activeJobKey);
+                this.analytics.personalizationCompleted(jobId, productType, false);
+                this.bus.emit("personalization:completed", { imageUrl: clean, cacheHit: false, jobId });
+                resolve({ imageUrl: clean, cacheHit: false, jobId });
+                return;
+              }
+              if (status === "FAILED") {
+                settled = true;
+                clearTimeout(timeoutHandle);
+                await this.cache.clearActiveJob(activeJobKey);
+                reject(jobFailedError({ jobId, message: errorMessage }));
+                return;
+              }
+              await new Promise((r) => setTimeout(r, this.config.pollIntervalMs));
+            } catch (e) {
+              settled = true;
+              clearTimeout(timeoutHandle);
+              await this.cache.clearActiveJob(activeJobKey);
+              reject(normalizeError(e));
+              return;
+            }
+          }
+        };
+        void pollFurnitureStatus();
+        return;
+      }
       this.api.stream(
         statusPath,
         async (event) => {
