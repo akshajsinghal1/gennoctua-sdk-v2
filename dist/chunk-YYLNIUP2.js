@@ -59,13 +59,10 @@ function normalizeError(e) {
 
 // src/api-client.ts
 var ENDPOINTS = {
-  // Person try-on (fashion, eyewear, footwear, makeup, accessories)
+  // Try-on (person + furniture) — proxied to HP POST /api/tryon/submit + GET /api/tryon/status/:id (SSE)
   submit: "/submit",
   status: "/status",
-  // Room generation (furniture, home decor)
-  generateRoom: "/api/gen/generate-room",
-  roomStatus: "/api/gen/status",
-  // Shared utilities
+  // Shared utilities (proxied to HP)
   uploadImage: "/api/uploads/user-image",
   profileSelect: "/api/profile/select",
   roomSelect: "/api/room/select"
@@ -253,5 +250,5 @@ var ApiClient = class {
 };
 
 export { ApiClient, ENDPOINTS, SDKError, cacheError, configError, jobFailedError, jobTimeoutError, normalizeError, rateLimitedError };
-//# sourceMappingURL=chunk-SSHR5MB7.js.map
-//# sourceMappingURL=chunk-SSHR5MB7.js.map
+//# sourceMappingURL=chunk-YYLNIUP2.js.map
+//# sourceMappingURL=chunk-YYLNIUP2.js.map

@@ -1,5 +1,5 @@
-import { ApiClient, normalizeError, cacheError, rateLimitedError, SDKError, jobFailedError, jobTimeoutError, configError } from './chunk-SSHR5MB7.js';
-export { SDKError } from './chunk-SSHR5MB7.js';
+import { ApiClient, normalizeError, cacheError, rateLimitedError, SDKError, jobFailedError, jobTimeoutError, configError } from './chunk-YYLNIUP2.js';
+export { SDKError } from './chunk-YYLNIUP2.js';
 
 // src/config.ts
 var DEFAULT_MAX_IMAGES = 80;
@@ -773,7 +773,7 @@ var ProductContextService = class {
   }
   // ── Product type resolution (remote LLM fallback) ──────────────────────────
   /**
-   * Calls POST https://ec.gennoctua.com/api/detect-product-type
+   * Optional remote product-type detector (POST .../api/detect-product-type on your proxy).
    * Silently returns null on any failure — never breaks the pipeline.
    */
   async detectProductTypeRemote(imageUrl, title, description) {
@@ -813,13 +813,6 @@ var FURNITURE_PRODUCT_TYPES = /* @__PURE__ */ new Set([
   "kitchen_furniture",
   "home_decor"
 ]);
-var ROOM_TYPE_FROM_CATEGORY = {
-  room_bedroom: "bedroom",
-  room_living_room: "living_room",
-  room_kitchen: "kitchen",
-  room_dining_room: "dining_room",
-  room_bathroom: "bathroom"
-};
 var POSE_TAG_FROM_CATEGORY = {
   male_full_body: "1",
   female_full_body: "1",
@@ -844,12 +837,12 @@ var BROAD_CATEGORY = {
   makeup_lipstick: "makeup",
   makeup_foundation: "makeup",
   makeup_mascara: "makeup",
-  bedroom_furniture: "accessories",
-  bathroom_furniture: "accessories",
-  living_room_furniture: "accessories",
-  dining_room_furniture: "accessories",
-  kitchen_furniture: "accessories",
-  home_decor: "accessories"
+  bedroom_furniture: "furniture",
+  bathroom_furniture: "furniture",
+  living_room_furniture: "furniture",
+  dining_room_furniture: "furniture",
+  kitchen_furniture: "furniture",
+  home_decor: "furniture"
 };
 var PRODUCT_TYPE_LABEL = {
   sunglasses: "sunglasses",
@@ -914,7 +907,7 @@ var PersonalizationService = class {
         console.info(`[personalize-sdk] Restoring active job ${jobId}`);
       }
     }
-    const { ENDPOINTS } = await import('./api-client-W2UV2HEY.js');
+    const { ENDPOINTS } = await import('./api-client-UH2EXBHR.js');
     const isFurniture = FURNITURE_PRODUCT_TYPES.has(productType);
     if (!jobId) {
       if (abortSignal?.aborted) {
@@ -924,15 +917,11 @@ var PersonalizationService = class {
       const form = new FormData();
       let submitPath;
       if (isFurniture) {
-        const roomType = ROOM_TYPE_FROM_CATEGORY[userImageCategory] ?? "bedroom";
-        form.append("room_type", roomType);
-        if (userImageUrl) {
-          form.append("room_image_url", userImageUrl);
-        } else {
-          form.append("room_image", userImage, "room.jpg");
-        }
-        form.append("object_url", productImageUrl);
-        submitPath = ENDPOINTS.generateRoom;
+        form.append("user_image", userImage, "room.jpg");
+        form.append("garment_image_url", productImageUrl);
+        form.append("product_type", PRODUCT_TYPE_LABEL[productType] ?? productType);
+        form.append("category", "furniture");
+        submitPath = ENDPOINTS.submit;
       } else {
         form.append("user_image", userImage, "profile.jpg");
         form.append("garment_image_url", productImageUrl);
@@ -952,7 +941,7 @@ var PersonalizationService = class {
       this.bus.emit("personalization:job_created", { jobId });
     }
     this.bus.emit("personalization:polling_started", { jobId });
-    const statusPath = isFurniture ? `${ENDPOINTS.roomStatus}/${jobId}` : `${ENDPOINTS.status}/${jobId}`;
+    const statusPath = `${ENDPOINTS.status}/${jobId}`;
     return new Promise((resolve, reject) => {
       let settled = false;
       const timeoutMs = this.config.pollIntervalMs * this.config.pollMaxAttempts;
@@ -962,55 +951,6 @@ var PersonalizationService = class {
         void this.cache.clearActiveJob(activeJobKey);
         reject(jobTimeoutError(this.config.pollMaxAttempts));
       }, timeoutMs);
-      if (isFurniture) {
-        const pollFurnitureStatus = async () => {
-          while (!settled) {
-            if (abortSignal?.aborted) {
-              settled = true;
-              clearTimeout(timeoutHandle);
-              await this.cache.clearActiveJob(activeJobKey);
-              this.bus.emit("personalization:cancelled", { jobId: jobId ?? void 0 });
-              reject(new Error("Cancelled"));
-              return;
-            }
-            try {
-              const raw = await this.api.get(statusPath);
-              const latest = Array.isArray(raw) ? raw[raw.length - 1] : raw;
-              const data = latest && typeof latest === "object" && "data" in latest ? latest.data : null;
-              const status = typeof data?.status === "string" ? data.status : void 0;
-              const outputUrl = typeof data?.output_url === "string" ? data.output_url : void 0;
-              const errorMessage = typeof data?.error === "string" && data.error.trim().length ? data.error : "Try-on job failed on server";
-              if (status === "COMPLETED" && outputUrl) {
-                settled = true;
-                clearTimeout(timeoutHandle);
-                const clean = `${outputUrl.split("?")[0]}?t=${Date.now()}`;
-                await this.cache.setResult(cacheKey, clean, this.config.cache.resultTtlMs);
-                await this.cache.clearActiveJob(activeJobKey);
-                this.analytics.personalizationCompleted(jobId, productType, false);
-                this.bus.emit("personalization:completed", { imageUrl: clean, cacheHit: false, jobId });
-                resolve({ imageUrl: clean, cacheHit: false, jobId });
-                return;
-              }
-              if (status === "FAILED") {
-                settled = true;
-                clearTimeout(timeoutHandle);
-                await this.cache.clearActiveJob(activeJobKey);
-                reject(jobFailedError({ jobId, message: errorMessage }));
-                return;
-              }
-              await new Promise((r) => setTimeout(r, this.config.pollIntervalMs));
-            } catch (e) {
-              settled = true;
-              clearTimeout(timeoutHandle);
-              await this.cache.clearActiveJob(activeJobKey);
-              reject(normalizeError(e));
-              return;
-            }
-          }
-        };
-        void pollFurnitureStatus();
-        return;
-      }
       this.api.stream(
         statusPath,
         async (event) => {

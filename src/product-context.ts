@@ -200,7 +200,7 @@ export class ProductContextService {
   // ── Product type resolution (remote LLM fallback) ──────────────────────────
 
   /**
-   * Calls POST https://ec.gennoctua.com/api/detect-product-type
+   * Optional remote product-type detector (POST .../api/detect-product-type on your proxy).
    * Silently returns null on any failure — never breaks the pipeline.
    */
   private async detectProductTypeRemote(

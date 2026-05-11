@@ -17,18 +17,6 @@ const FURNITURE_PRODUCT_TYPES = new Set<ProductType>([
   "home_decor",
 ]);
 
-// ─── Room type string sent to /api/gen/generate-room ─────────────────────────
-// Maps UserImageCategory → room_type param expected by the backend.
-// "bathroom" falls back to generic furniture behaviour on the backend.
-
-const ROOM_TYPE_FROM_CATEGORY: Partial<Record<UserImageCategory, string>> = {
-  room_bedroom:      "bedroom",
-  room_living_room:  "living_room",
-  room_kitchen:      "kitchen",
-  room_dining_room:  "dining_room",
-  room_bathroom:     "bathroom",
-};
-
 // ─── Pose tag derived from user image category ────────────────────────────────
 // Sent as `tag` field in the job submit payload. Tells the backend how much of
 // the body is visible, so generation strategy can be adjusted accordingly.
@@ -60,12 +48,12 @@ const BROAD_CATEGORY: Record<ProductType, string> = {
   makeup_lipstick:        "makeup",
   makeup_foundation:      "makeup",
   makeup_mascara:         "makeup",
-  bedroom_furniture:      "accessories",
-  bathroom_furniture:     "accessories",
-  living_room_furniture:  "accessories",
-  dining_room_furniture:  "accessories",
-  kitchen_furniture:      "accessories",
-  home_decor:             "accessories",
+  bedroom_furniture:      "furniture",
+  bathroom_furniture:     "furniture",
+  living_room_furniture:  "furniture",
+  dining_room_furniture: "furniture",
+  kitchen_furniture:      "furniture",
+  home_decor:             "furniture",
 };
 
 // ─── Descriptive product_type label sent to HyperPersona ─────────────────────
@@ -185,20 +173,18 @@ export class PersonalizationService {
       let submitPath: string;
 
       if (isFurniture) {
-        // ── Room generation flow ─────────────────────────────────────────────
-        // POST /api/gen/generate-room
-        //   room_type      — derived from user image category
-        //   room_image     — room photo blob (or URL if pre-uploaded to GCS)
-        //   object_url     — furniture product image URL
-        const roomType = ROOM_TYPE_FROM_CATEGORY[userImageCategory] ?? "bedroom";
-        form.append("room_type", roomType);
-        if (userImageUrl) {
-          form.append("room_image_url", userImageUrl);
-        } else {
-          form.append("room_image", userImage, "room.jpg");
-        }
-        form.append("object_url", productImageUrl);
-        submitPath = ENDPOINTS.generateRoom;
+        // ── Furniture try-on (Hyperpersona) ───────────────────────────────────
+        // POST /submit → proxied to HP POST /api/tryon/submit
+        //   user_image         — room photo (blob)
+        //   garment_image_url  — furniture product image URL
+        //   product_type       — descriptive label
+        //   category           — must be "furniture"
+        form.append("user_image", userImage, "room.jpg");
+        void userImageUrl;
+        form.append("garment_image_url", productImageUrl);
+        form.append("product_type", PRODUCT_TYPE_LABEL[productType] ?? productType);
+        form.append("category", "furniture");
+        submitPath = ENDPOINTS.submit;
       } else {
         // ── Person try-on flow ───────────────────────────────────────────────
         // POST /submit (proxied to category-specific endpoint)
@@ -236,10 +222,8 @@ export class PersonalizationService {
     // ── 4. Stream SSE until COMPLETED or FAILED ──────────────────────────────
     this.bus.emit("personalization:polling_started", { jobId });
 
-    // Furniture jobs use a different status path than person try-on jobs
-    const statusPath = isFurniture
-      ? `${ENDPOINTS.roomStatus}/${jobId}`
-      : `${ENDPOINTS.status}/${jobId}`;
+    // Person and furniture try-on both use HP GET /api/tryon/status/:jobId (SSE).
+    const statusPath = `${ENDPOINTS.status}/${jobId}`;
 
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -252,68 +236,6 @@ export class PersonalizationService {
         void this.cache.clearActiveJob(activeJobKey);
         reject(jobTimeoutError(this.config.pollMaxAttempts));
       }, timeoutMs);
-
-      // Furniture endpoints return JSON snapshots, not SSE events.
-      if (isFurniture) {
-        const pollFurnitureStatus = async () => {
-          while (!settled) {
-            if (abortSignal?.aborted) {
-              settled = true;
-              clearTimeout(timeoutHandle);
-              await this.cache.clearActiveJob(activeJobKey);
-              this.bus.emit("personalization:cancelled", { jobId: jobId ?? undefined });
-              reject(new Error("Cancelled"));
-              return;
-            }
-
-            try {
-              const raw = await this.api.get(statusPath);
-              const latest = Array.isArray(raw) ? raw[raw.length - 1] : raw;
-              const data = (latest && typeof latest === "object" && "data" in latest)
-                ? (latest as { data?: Record<string, unknown> }).data
-                : null;
-
-              const status = typeof data?.status === "string" ? data.status : undefined;
-              const outputUrl = typeof data?.output_url === "string" ? data.output_url : undefined;
-              const errorMessage =
-                typeof data?.error === "string" && data.error.trim().length
-                  ? data.error
-                  : "Try-on job failed on server";
-
-              if (status === "COMPLETED" && outputUrl) {
-                settled = true;
-                clearTimeout(timeoutHandle);
-                const clean = `${outputUrl.split("?")[0]}?t=${Date.now()}`;
-                await this.cache.setResult(cacheKey, clean, this.config.cache.resultTtlMs);
-                await this.cache.clearActiveJob(activeJobKey);
-                this.analytics.personalizationCompleted(jobId!, productType, false);
-                this.bus.emit("personalization:completed", { imageUrl: clean, cacheHit: false, jobId: jobId! });
-                resolve({ imageUrl: clean, cacheHit: false, jobId: jobId! });
-                return;
-              }
-
-              if (status === "FAILED") {
-                settled = true;
-                clearTimeout(timeoutHandle);
-                await this.cache.clearActiveJob(activeJobKey);
-                reject(jobFailedError({ jobId, message: errorMessage }));
-                return;
-              }
-
-              await new Promise((r) => setTimeout(r, this.config.pollIntervalMs));
-            } catch (e) {
-              settled = true;
-              clearTimeout(timeoutHandle);
-              await this.cache.clearActiveJob(activeJobKey);
-              reject(normalizeError(e));
-              return;
-            }
-          }
-        };
-
-        void pollFurnitureStatus();
-        return;
-      }
 
       this.api.stream(
         statusPath,

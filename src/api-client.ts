@@ -55,13 +55,10 @@ export type LLMRoomSelectResult = {
 };
 
 export const ENDPOINTS = {
-  // Person try-on (fashion, eyewear, footwear, makeup, accessories)
+  // Try-on (person + furniture) — proxied to HP POST /api/tryon/submit + GET /api/tryon/status/:id (SSE)
   submit:         "/submit",
   status:         "/status",
-  // Room generation (furniture, home decor)
-  generateRoom:   "/api/gen/generate-room",
-  roomStatus:     "/api/gen/status",
-  // Shared utilities
+  // Shared utilities (proxied to HP)
   uploadImage:    "/api/uploads/user-image",
   profileSelect:  "/api/profile/select",
   roomSelect:     "/api/room/select",
