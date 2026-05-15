@@ -430,30 +430,39 @@ declare const Personalize: {
 };
 
 /**
- * room-classifier.ts — YOLOv8n ONNX object-detection room classifier
+ * room-classifier.ts — YOLOv11n ONNX object-detection room classifier
  *
- * Ports the Android SDK RoomInference.infer() scoring logic to the web,
- * upgraded from YOLOv3-tiny to YOLOv8n for significantly stronger detection.
+ * Ports the Android SDK RoomInference.infer() scoring logic to the web.
  *
  * Scoring rules (tuned against real home photo dataset):
- *   "bed"          → bedroom      (+2.0, +1.0 bonus if conf > 50%)
+ *   "bed"          → bedroom      (+2.0, +3.0 if conf > 50%)
  *   "couch"        → living_room  (+2.0 if area ≥ 8%, else +1.5)
+ *                    only when couchConf > 0.40 (below that it's likely a misdetected bed)
  *   "tv"           → living_room  (+1.5)
- *   "chair"        → living_room  (+0.8) when no dining table present
- *                  → dining_room  (+0.5) when dining table also detected
+ *   "chair"        → living_room  (+0.8) when no dining table / chairs-only-dining
+ *                  → dining_room  (+0.5) when dining table present OR chairs-only-dining
  *   "dining table" → dining_room  (+2.0 if area ≥ 8%, +1.0 if area ≥ 3%)
+ *                    skipped when dominant couch present (coffee-table FP guard)
+ *                    skipped in open-plan rooms where couch + table both > 0.40
  *
  * Anti-false-positive rules:
- *   - If couch confidence > bed confidence × 0.95 → bedroomScore = 0
- *     (prevents large sofa from being mistaken for a bed)
- *   - If TV detected AND bed confidence < 0.32 → bedroomScore = 0
- *     (prevents low-confidence bed from overriding a strong TV signal)
+ *   1. couch conf > bed conf × 0.95 AND couch conf > 0.40
+ *      AND couch area > bed area + 0.05 → bedroomScore = 0
+ *      (sofa misread as bed; area guard preserves real bed+couch bedroom shots)
+ *   2. TV detected AND bed conf < 0.32 → bedroomScore = 0
+ *      (low-conf bed overriding a strong TV signal)
+ *   3. Sub-threshold bed (conf 0.05–0.15) with no other furniture detected AND
+ *      raw couch score > 0.02 → treat as living room
+ *      (boucle/curved sofa misread as a bed at very low confidence)
+ *
+ * Chairs-only dining: 2+ high-conf chairs (≥0.50) with no couch or TV → route
+ * chairs to dining_room even without a detected dining table.
  *
  * Minimum score of 1.5 required to return a classification.
  * Tie-breaking: bedroom > dining_room > living_room
  *   (dining only wins if diningScore strictly exceeds livingScore)
  *
- * Model: YOLOv8n ONNX (~12 MB)
+ * Model: YOLOv11n ONNX (~10 MB)
  *   Input  "images":  [1, 3, 640, 640] float32  (RGB, values 0..1, no ImageNet norm)
  *   Output "output0": [1, 84, 8400]    float32  (4 box coords + 80 COCO class scores)
  */

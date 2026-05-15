@@ -1004,6 +1004,10 @@ var FURNITURE_CLASS_MAP = {
   "tv": 62
 };
 var RAW_SCORE_THRESHOLD = 0.15;
+var CLASS_THRESHOLDS = {
+  "bed": 0.05
+  // lowered: arch-headboard / upholstered beds often score 0.05–0.10
+};
 var MAX_BOXES_PER_CLASS = {
   "chair": 4,
   // dining set / lounge chairs
@@ -1017,15 +1021,21 @@ var MAX_BOXES_PER_CLASS = {
   // one table per room
 };
 var CENTRE_MIN_DIST_PX = 80;
-function inferRoom(detections) {
+function inferRoom(detections, rawMax) {
   let livingScore = 0;
   let bedroomScore = 0;
   let diningScore = 0;
   let bedConf = 0;
+  let bedArea = 0;
   let couchConf = 0;
+  let couchArea = 0;
   let topLabel = "";
   let topScore = 0;
   const hasDiningTable = detections.some((d) => d.label === "dining table");
+  const hasCouchOrTV = detections.some((d) => d.label === "couch" || d.label === "tv");
+  const highConfChairs = detections.filter((d) => d.label === "chair" && d.confidence >= 0.5);
+  const chairsOnlyDining = !hasDiningTable && !hasCouchOrTV && highConfChairs.length >= 2;
+  const couchConfPrepass = detections.filter((d) => d.label === "couch").reduce((max, d) => Math.max(max, d.confidence), 0);
   for (const d of detections) {
     if (d.confidence > topScore) {
       topScore = d.confidence;
@@ -1036,32 +1046,50 @@ function inferRoom(detections) {
         bedroomScore += d.confidence > 0.5 ? 3 : 2;
         if (d.confidence > bedConf) {
           bedConf = d.confidence;
-          d.areaPercentage;
+          bedArea = d.areaPercentage;
         }
         break;
       case "couch":
-        livingScore += d.areaPercentage >= 0.08 ? 2 : 1.5;
-        if (d.confidence > couchConf) couchConf = d.confidence;
+        if (d.confidence > 0.4) {
+          livingScore += d.areaPercentage >= 0.08 ? 2 : 1.5;
+        }
+        if (d.confidence > couchConf) {
+          couchConf = d.confidence;
+          couchArea = d.areaPercentage;
+        }
         break;
       case "tv":
         livingScore += 1.5;
         break;
       case "chair":
-        if (hasDiningTable) diningScore += 0.5;
+        if (hasDiningTable || chairsOnlyDining) diningScore += 0.5;
         else livingScore += 0.8;
         break;
       case "dining table":
+        if (couchConfPrepass > 0.8) {
+          break;
+        }
+        if (couchConfPrepass > 0.4 && d.confidence > 0.4) {
+          break;
+        }
         if (d.areaPercentage >= 0.08) diningScore += 2;
         else if (d.areaPercentage >= 0.03) diningScore += 1;
         break;
     }
   }
-  if (bedroomScore > 0 && couchConf > bedConf * 0.95) {
+  if (bedroomScore > 0 && couchConf > bedConf * 0.95 && couchConf > 0.4 && couchArea > bedArea + 0.05) {
     bedroomScore = 0;
   }
   const hasTV = detections.some((d) => d.label === "tv");
   if (bedroomScore > 0 && hasTV && bedConf < 0.32) {
     bedroomScore = 0;
+  }
+  if (bedConf > 0 && bedConf < 0.15) {
+    const otherFurniture = detections.filter((d) => d.label !== "bed");
+    if (otherFurniture.length === 0 && (rawMax["couch"] ?? 0) > 0.02) {
+      bedroomScore = 0;
+      livingScore += 1.5;
+    }
   }
   const maxScore = Math.max(livingScore, bedroomScore, diningScore);
   if (maxScore < 1.5) return null;
@@ -1143,17 +1171,26 @@ function preprocessForYolo(img, ort) {
 function parseOutputs(outputs, outputNames) {
   const S = YOLO_INPUT_SIZE;
   const out = outputs[outputNames[0]];
-  if (!out || out.type !== "float32" || out.dims[2] !== 8400) return [];
+  if (!out || out.type !== "float32" || out.dims[2] !== 8400) {
+    return { dets: [], rawMax: {} };
+  }
   const N = 8400;
   const data = out.data;
   const dets = [];
+  const rawMax = {};
   for (const [label, classIdx] of Object.entries(FURNITURE_CLASS_MAP)) {
     const row = (4 + classIdx) * N;
     const maxCount = MAX_BOXES_PER_CLASS[label] ?? 1;
+    const threshold = CLASS_THRESHOLDS[label] ?? RAW_SCORE_THRESHOLD;
+    let classRawMax = 0;
+    for (let b = 0; b < N; b++) {
+      if (data[row + b] > classRawMax) classRawMax = data[row + b];
+    }
+    rawMax[label] = classRawMax;
     const candidates = [];
     for (let b = 0; b < N; b++) {
       const s = data[row + b];
-      if (s > RAW_SCORE_THRESHOLD) candidates.push({ idx: b, score: s });
+      if (s > threshold) candidates.push({ idx: b, score: s });
     }
     if (candidates.length === 0) continue;
     candidates.sort((a, b) => b.score - a.score);
@@ -1175,7 +1212,7 @@ function parseOutputs(outputs, outputNames) {
       dets.push({ label, confidence: score, areaPercentage: area });
     }
   }
-  return dets.sort((a, b) => b.confidence - a.confidence);
+  return { dets: dets.sort((a, b) => b.confidence - a.confidence), rawMax };
 }
 async function classifyRoom(file, modelUrl) {
   try {
@@ -1198,8 +1235,9 @@ async function classifyRoom(file, modelUrl) {
       [session.inputNames[0]]: imageTensor
     };
     const output = await session.run(feeds);
-    const detections = parseOutputs(output, session.outputNames);
-    const result = inferRoom(detections);
+    const { dets, rawMax } = parseOutputs(output, session.outputNames);
+    const detections = dets;
+    const result = inferRoom(detections, rawMax);
     if (!result) {
       return {
         roomType: "other",
