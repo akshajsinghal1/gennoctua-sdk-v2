@@ -457,8 +457,8 @@ declare const Personalize: {
  *   Input  "images":  [1, 3, 640, 640] float32  (RGB, values 0..1, no ImageNet norm)
  *   Output "output0": [1, 84, 8400]    float32  (4 box coords + 80 COCO class scores)
  */
-/** YOLOv8n ONNX hosted on Gennoctua GCS (~12 MB) */
-declare const DEFAULT_ROOM_MODEL_URL = "https://storage.googleapis.com/gennoctua/yolov8n.onnx";
+/** YOLOv11n ONNX hosted on Gennoctua GCS (~10 MB) */
+declare const DEFAULT_ROOM_MODEL_URL = "https://storage.googleapis.com/gennoctua/yolo11n.onnx";
 type RoomType = "bedroom" | "living_room" | "dining_room" | "kitchen" | "bathroom" | "other";
 type RoomClassification = {
     roomType: RoomType;

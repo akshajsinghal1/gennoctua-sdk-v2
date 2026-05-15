@@ -995,7 +995,7 @@ var PersonalizationService = class {
 // src/room-classifier.ts
 var ONNX_RUNTIME_CDN = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js";
 var ONNX_WASM_PATH = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/";
-var DEFAULT_ROOM_MODEL_URL = "https://storage.googleapis.com/gennoctua/yolov8n.onnx";
+var DEFAULT_ROOM_MODEL_URL = "https://storage.googleapis.com/gennoctua/yolo11n.onnx";
 var FURNITURE_CLASS_MAP = {
   "chair": 56,
   "couch": 57,
