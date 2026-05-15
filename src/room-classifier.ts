@@ -32,9 +32,9 @@
 const ONNX_RUNTIME_CDN = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/ort.min.js";
 const ONNX_WASM_PATH   = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.18.0/dist/";
 
-/** YOLOv8n ONNX hosted on Gennoctua GCS (~12 MB) */
+/** YOLOv11n ONNX hosted on Gennoctua GCS (~10 MB) */
 export const DEFAULT_ROOM_MODEL_URL =
-  "https://storage.googleapis.com/gennoctua/yolov8n.onnx";
+  "https://storage.googleapis.com/gennoctua/yolo11n.onnx";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
