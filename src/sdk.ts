@@ -20,6 +20,7 @@ import type {
   SDKEventMap,
   ProductContext,
   ProductType,
+  HpCategory,
   UserGender,
   SelectionSummary,
   EligibilityResult,
@@ -278,32 +279,35 @@ export class PersonalizeSDK {
   async personalize(opts: {
     imageUrl: string;
     productType: ProductType;
-    /** Required for all person products. Determines which profile photo is used.
-     *  Ignored for furniture / room products. */
-    gender: UserGender;
+    /** Required for person products (clothing, eyewear, footwear, etc.).
+     *  Not needed when category is "furniture". */
+    gender?: UserGender;
+    /** The broad category sent to HyperPersona. Controls job routing on the backend. */
+    category: HpCategory;
     productId?: string;
     abortSignal?: AbortSignal;
   }): Promise<PersonalizationResult> {
-    const { imageUrl, productType, gender, productId } = opts;
+    const { imageUrl, productType, gender, category, productId } = opts;
 
     // Resolve product context
     const ctx = await this.resolveProduct({ imageUrl, productType, productId });
 
-    // Resolve required user image category from gender + productType
-    const resolvedCategory = resolveCategoryFromGender(ctx.productType, gender);
-
     let requiredCategory: UserImageCategory;
 
-    if (resolvedCategory === null) {
-      // Furniture / room product — use standard eligibility check
+    if (category === "furniture") {
+      // Furniture / room product — resolve via eligibility (room photo required)
       const eligibility = await this.getEligibility(ctx.productType);
       if (!eligibility.eligible) {
         throw normalizeError(new Error(`Product not eligible for personalization: ${eligibility.reason}`));
       }
       requiredCategory = eligibility.requiredCategory;
     } else {
-      // Person product — use gender to pick exact category
-      requiredCategory = resolvedCategory;
+      // Person product — gender required
+      if (!gender) {
+        throw normalizeError(new Error(`gender is required for category "${category}"`));
+      }
+      const resolvedCategory = resolveCategoryFromGender(ctx.productType, gender);
+      requiredCategory = resolvedCategory ?? (gender === "male" ? "male_full_body" : "female_full_body");
       const hasCategory = this.selectionSummary?.availableCategories.includes(requiredCategory);
       if (!hasCategory) {
         throw normalizeError(new Error(
@@ -350,6 +354,7 @@ export class PersonalizeSDK {
       productImageUrl: ctx.image.imageUrl,
       productImageHash: ctx.image.imageUrl,
       productType: ctx.productType,
+      category,
       productId: ctx.productId,
       abortSignal: this.activeAbortController.signal,
     });
@@ -385,10 +390,10 @@ export class PersonalizeSDK {
     const results = await Promise.allSettled(
       products.map(async (p): Promise<BatchResult> => {
         // Resolve category from gender (person) or productType (furniture)
-        const resolvedCategory = resolveCategoryFromGender(p.productType, p.gender);
         let requiredCategory: UserImageCategory;
 
-        if (resolvedCategory === null) {
+        if (p.category === "furniture") {
+          // Room product — resolve via eligibility
           const eligibility = checkEligibility(p.productType, this.selectionSummary);
           if (!eligibility.eligible) {
             const r: BatchResult = { productId: p.productId, status: "ineligible", reason: eligibility.reason };
@@ -397,7 +402,14 @@ export class PersonalizeSDK {
           }
           requiredCategory = (eligibility as EligibilityResult & { eligible: true }).requiredCategory;
         } else {
-          requiredCategory = resolvedCategory;
+          // Person product — gender required
+          if (!p.gender) {
+            const r: BatchResult = { productId: p.productId, status: "failed", error: `gender is required for category "${p.category}"` };
+            onResult?.(r);
+            return r;
+          }
+          const resolvedCategory = resolveCategoryFromGender(p.productType, p.gender);
+          requiredCategory = resolvedCategory ?? (p.gender === "male" ? "male_full_body" : "female_full_body");
           const hasCategory = this.selectionSummary?.availableCategories.includes(requiredCategory);
           if (!hasCategory) {
             const r: BatchResult = { productId: p.productId, status: "ineligible", reason: "REQUIRED_USER_IMAGE_MISSING" };
@@ -422,6 +434,7 @@ export class PersonalizeSDK {
             productImageUrl: p.imageUrl,
             productImageHash: p.imageUrl,
             productType: p.productType,
+            category: p.category,
             productId: p.productId,
           });
           const r: BatchResult = {

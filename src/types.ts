@@ -21,8 +21,27 @@ export type PublicKeyAuthConfig = {
 
 export type AuthConfig = ProxyAuthConfig | PublicKeyAuthConfig;
 
+// ─── HyperPersona category ───────────────────────────────────────────────────
+
+/** The broad category value sent to the HyperPersona /submit endpoint.
+ *  Must be exactly one of these strings — HP routes the job based on this. */
+export type HpCategory =
+  | "clothing"
+  | "footwear"
+  | "eyewear"
+  | "jewellery"
+  | "accessories"
+  | "makeup"
+  | "furniture";
+
 // ─── Product ─────────────────────────────────────────────────────────────────
 
+/**
+ * The product type label sent to HyperPersona as `product_type`.
+ * Can be any string — e.g. "tops", "dresses", "co-ords", "activewear".
+ * Well-known values are listed below for autocomplete; they also have automatic
+ * `category` inference. For any other value, pass `category` explicitly.
+ */
 export type ProductType =
   // Eyewear
   | "sunglasses"
@@ -31,24 +50,27 @@ export type ProductType =
   | "mens_clothing"
   | "womens_clothing"
   | "kids_clothing"
-  // Footwear (gender-aware routing handled internally)
+  // Footwear
   | "footwear"
   // Jewellery
-  | "jewellery"        // → necklace_pendants
-  | "earrings"         // → earrings
+  | "jewellery"
+  | "earrings"
   // Bags
   | "bags"
   // Makeup
   | "makeup_lipstick"
   | "makeup_foundation"
   | "makeup_mascara"
-  // Furniture & decor (generic path)
+  // Furniture & decor
   | "bedroom_furniture"
   | "bathroom_furniture"
   | "living_room_furniture"
   | "dining_room_furniture"
   | "kitchen_furniture"
-  | "home_decor";
+  | "home_decor"
+  // Any custom product type (e.g. "tops", "dresses", "activewear")
+  // Pass `category` explicitly when using a custom type.
+  | (string & {});
 
 export type ProductImageSource =
   | "manual"
@@ -345,7 +367,11 @@ export type BatchProduct = {
   productId: string;
   imageUrl: string;
   productType: ProductType;
-  gender: UserGender;
+  /** Required for person products (clothing, eyewear, footwear, etc.).
+   *  Not needed for furniture — omit when category is "furniture". */
+  gender?: UserGender;
+  /** The broad category sent to HyperPersona. Controls job routing on the backend. */
+  category: HpCategory;
 };
 
 export type BatchResult = {

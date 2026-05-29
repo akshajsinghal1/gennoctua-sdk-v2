@@ -9,6 +9,7 @@ export type {
   ProductConfig,
   ProductRule,
   ProductType,
+  HpCategory,
   ProductContext,
   ProductImageContext,
   ProductImageSource,

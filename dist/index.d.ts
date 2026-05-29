@@ -35,7 +35,16 @@ type PublicKeyAuthConfig = {
     gennoctuaUrl?: string;
 };
 type AuthConfig = ProxyAuthConfig | PublicKeyAuthConfig;
-type ProductType = "sunglasses" | "eyeglasses" | "mens_clothing" | "womens_clothing" | "kids_clothing" | "footwear" | "jewellery" | "earrings" | "bags" | "makeup_lipstick" | "makeup_foundation" | "makeup_mascara" | "bedroom_furniture" | "bathroom_furniture" | "living_room_furniture" | "dining_room_furniture" | "kitchen_furniture" | "home_decor";
+/** The broad category value sent to the HyperPersona /submit endpoint.
+ *  Must be exactly one of these strings — HP routes the job based on this. */
+type HpCategory = "clothing" | "footwear" | "eyewear" | "jewellery" | "accessories" | "makeup" | "furniture";
+/**
+ * The product type label sent to HyperPersona as `product_type`.
+ * Can be any string — e.g. "tops", "dresses", "co-ords", "activewear".
+ * Well-known values are listed below for autocomplete; they also have automatic
+ * `category` inference. For any other value, pass `category` explicitly.
+ */
+type ProductType = "sunglasses" | "eyeglasses" | "mens_clothing" | "womens_clothing" | "kids_clothing" | "footwear" | "jewellery" | "earrings" | "bags" | "makeup_lipstick" | "makeup_foundation" | "makeup_mascara" | "bedroom_furniture" | "bathroom_furniture" | "living_room_furniture" | "dining_room_furniture" | "kitchen_furniture" | "home_decor" | (string & {});
 type ProductImageSource = "manual" | "selector" | "structured_data" | "platform_adapter" | "dom_heuristic";
 type ProductImageContext = {
     imageUrl: string;
@@ -261,7 +270,11 @@ type BatchProduct = {
     productId: string;
     imageUrl: string;
     productType: ProductType;
-    gender: UserGender;
+    /** Required for person products (clothing, eyewear, footwear, etc.).
+     *  Not needed for furniture — omit when category is "furniture". */
+    gender?: UserGender;
+    /** The broad category sent to HyperPersona. Controls job routing on the backend. */
+    category: HpCategory;
 };
 type BatchResult = {
     productId: string;
@@ -369,9 +382,11 @@ declare class PersonalizeSDK {
     personalize(opts: {
         imageUrl: string;
         productType: ProductType;
-        /** Required for all person products. Determines which profile photo is used.
-         *  Ignored for furniture / room products. */
-        gender: UserGender;
+        /** Required for person products (clothing, eyewear, footwear, etc.).
+         *  Not needed when category is "furniture". */
+        gender?: UserGender;
+        /** The broad category sent to HyperPersona. Controls job routing on the backend. */
+        category: HpCategory;
         productId?: string;
         abortSignal?: AbortSignal;
     }): Promise<PersonalizationResult>;
@@ -491,4 +506,4 @@ declare function resetRoomClassifier(): void;
  */
 declare function classifyRoom(file: File, modelUrl?: string): Promise<RoomClassification>;
 
-export { type AnalyticsConfig, type AnalyticsEvent, type AuthConfig, type BatchProduct, type BatchResult, type CacheConfig, DEFAULT_ROOM_MODEL_URL, type DebugState, type EligibilityResult, type PersonalizationMode, type PersonalizationResult, type PersonalizationState, Personalize, PersonalizeSDK, type ProductConfig, type ProductContext, type ProductImageContext, type ProductImageSource, type ProductRule, type ProductType, type RateLimitConfig, type RoomClassification, type RoomType, type SDKConfig, SDKError, type SDKErrorCode, type SDKEventMap, type SDKEventName, type SelectedImageAsset, type SelectionProgress, type SelectionSummary, type TopRoomCandidate, type TopRoomCandidatesMap, type UserGender, type UserImageCategory, type ViewMode, classifyRoom, resetRoomClassifier };
+export { type AnalyticsConfig, type AnalyticsEvent, type AuthConfig, type BatchProduct, type BatchResult, type CacheConfig, DEFAULT_ROOM_MODEL_URL, type DebugState, type EligibilityResult, type HpCategory, type PersonalizationMode, type PersonalizationResult, type PersonalizationState, Personalize, PersonalizeSDK, type ProductConfig, type ProductContext, type ProductImageContext, type ProductImageSource, type ProductRule, type ProductType, type RateLimitConfig, type RoomClassification, type RoomType, type SDKConfig, SDKError, type SDKErrorCode, type SDKEventMap, type SDKEventName, type SelectedImageAsset, type SelectionProgress, type SelectionSummary, type TopRoomCandidate, type TopRoomCandidatesMap, type UserGender, type UserImageCategory, type ViewMode, classifyRoom, resetRoomClassifier };

@@ -4,18 +4,8 @@ import type { ResolvedConfig } from "./config.js";
 import type { AnalyticsService } from "./analytics.js";
 import type { EventBus } from "./event-bus.js";
 import { jobFailedError, jobTimeoutError, normalizeError } from "./errors.js";
-import type { PersonalizationResult, ProductType, UserImageCategory } from "./types.js";
+import type { HpCategory, PersonalizationResult, UserImageCategory } from "./types.js";
 
-// ─── Furniture product types ──────────────────────────────────────────────────
-
-const FURNITURE_PRODUCT_TYPES = new Set<ProductType>([
-  "bedroom_furniture",
-  "bathroom_furniture",
-  "living_room_furniture",
-  "dining_room_furniture",
-  "kitchen_furniture",
-  "home_decor",
-]);
 
 // ─── Pose tag derived from user image category ────────────────────────────────
 // Sent as `tag` field in the job submit payload. Tells the backend how much of
@@ -33,32 +23,10 @@ const POSE_TAG_FROM_CATEGORY: Partial<Record<UserImageCategory, string>> = {
   // room_* categories intentionally omitted — no pose concept for furniture
 };
 
-// ─── Broad category sent to HyperPersona ─────────────────────────────────────
-
-const BROAD_CATEGORY: Record<ProductType, string> = {
-  sunglasses:             "eyewear",
-  eyeglasses:             "eyewear",
-  mens_clothing:          "clothing",
-  womens_clothing:        "clothing",
-  kids_clothing:          "clothing",
-  footwear:               "footwear",
-  jewellery:              "jewellery",
-  earrings:               "jewellery",
-  bags:                   "accessories",
-  makeup_lipstick:        "makeup",
-  makeup_foundation:      "makeup",
-  makeup_mascara:         "makeup",
-  bedroom_furniture:      "furniture",
-  bathroom_furniture:     "furniture",
-  living_room_furniture:  "furniture",
-  dining_room_furniture: "furniture",
-  kitchen_furniture:      "furniture",
-  home_decor:             "furniture",
-};
 
 // ─── Descriptive product_type label sent to HyperPersona ─────────────────────
 
-const PRODUCT_TYPE_LABEL: Record<ProductType, string> = {
+const PRODUCT_TYPE_LABEL: Partial<Record<string, string>> = {
   sunglasses:             "sunglasses",
   eyeglasses:             "eyeglasses",
   mens_clothing:          "mens clothing",
@@ -115,6 +83,8 @@ export class PersonalizationService {
     productImageUrl: string;
     productImageHash: string;
     productType: ProductType;
+    /** The broad category sent to HyperPersona. Controls job routing on the backend. */
+    category: HpCategory;
     productId?: string;
     abortSignal?: AbortSignal;
   }): Promise<PersonalizationResult> {
@@ -126,6 +96,7 @@ export class PersonalizationService {
       productImageUrl,
       productImageHash,
       productType,
+      category,
       abortSignal,
     } = opts;
 
@@ -161,7 +132,7 @@ export class PersonalizationService {
 
     // ── 3. Submit job if no active job ───────────────────────────────────────
     const { ENDPOINTS } = await import("./api-client.js");
-    const isFurniture = FURNITURE_PRODUCT_TYPES.has(productType);
+    const isFurniture = category === "furniture";
 
     if (!jobId) {
       if (abortSignal?.aborted) {
@@ -183,7 +154,7 @@ export class PersonalizationService {
         void userImageUrl;
         form.append("garment_image_url", productImageUrl);
         form.append("product_type", PRODUCT_TYPE_LABEL[productType] ?? productType);
-        form.append("category", "furniture");
+        form.append("category", category);
         submitPath = ENDPOINTS.submit;
       } else {
         // ── Person try-on flow ───────────────────────────────────────────────
@@ -197,7 +168,7 @@ export class PersonalizationService {
         void userImageUrl; // GCS URL used only for profile LLM, not for HP submit
         form.append("garment_image_url", productImageUrl);
         form.append("product_type", PRODUCT_TYPE_LABEL[productType] ?? productType);
-        form.append("category", BROAD_CATEGORY[productType] ?? "accessories");
+        form.append("category", category);
 
         // tag = pose score — tells backend how much body is visible.
         //   1 = full body (ankles visible) — best for clothing/footwear

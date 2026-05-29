@@ -4,7 +4,7 @@ import type { ProductType, UserImageCategory, EligibilityResult, SelectionSummar
  * Maps each product type to the required user image categories (in priority order).
  * First match wins — if the user has any of the listed categories, they're eligible.
  */
-export const PRODUCT_TYPE_MAPPING: Record<ProductType, UserImageCategory[]> = {
+export const PRODUCT_TYPE_MAPPING: Partial<Record<string, UserImageCategory[]>> = {
   // Eyewear
   sunglasses:             ["male_face_closeup", "female_face_closeup", "kid_boy_face_closeup", "kid_girl_face_closeup"],
   eyeglasses:             ["male_face_closeup", "female_face_closeup", "kid_boy_face_closeup", "kid_girl_face_closeup"],
@@ -37,7 +37,7 @@ export const PRODUCT_TYPE_MAPPING: Record<ProductType, UserImageCategory[]> = {
 
 type ProductNeed = "face" | "body" | "room";
 
-const PRODUCT_NEEDS: Record<ProductType, ProductNeed> = {
+const PRODUCT_NEEDS: Partial<Record<string, ProductNeed>> = {
   sunglasses:             "face",
   eyeglasses:             "face",
   mens_clothing:          "body",
@@ -67,14 +67,17 @@ export function resolveCategoryFromGender(
   gender: UserGender,
 ): UserImageCategory | null {
   const need = PRODUCT_NEEDS[productType];
+  // Unknown custom product types (e.g. "tops", "dresses") default to "body"
+  // since they are person products — caller must pass category explicitly.
   if (need === "room") return null;
+  const resolvedNeed = need ?? "body";
 
   const isMale = gender === "male" || gender === "kid_boy";
 
-  if (gender === "kid_boy")  return need === "face" ? "kid_boy_face_closeup"  : "kid_boy_full_body";
-  if (gender === "kid_girl") return need === "face" ? "kid_girl_face_closeup" : "kid_girl_full_body";
-  if (isMale)                return need === "face" ? "male_face_closeup"     : "male_full_body";
-  return                            need === "face" ? "female_face_closeup"   : "female_full_body";
+  if (gender === "kid_boy")  return resolvedNeed === "face" ? "kid_boy_face_closeup"  : "kid_boy_full_body";
+  if (gender === "kid_girl") return resolvedNeed === "face" ? "kid_girl_face_closeup" : "kid_girl_full_body";
+  if (isMale)                return resolvedNeed === "face" ? "male_face_closeup"     : "male_full_body";
+  return                            resolvedNeed === "face" ? "female_face_closeup"   : "female_full_body";
 }
 
 export function getRequiredCategories(productType: ProductType): UserImageCategory[] {

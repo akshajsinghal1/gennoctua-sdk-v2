@@ -805,14 +805,6 @@ var ProductContextService = class {
 };
 
 // src/personalization.ts
-var FURNITURE_PRODUCT_TYPES = /* @__PURE__ */ new Set([
-  "bedroom_furniture",
-  "bathroom_furniture",
-  "living_room_furniture",
-  "dining_room_furniture",
-  "kitchen_furniture",
-  "home_decor"
-]);
 var POSE_TAG_FROM_CATEGORY = {
   male_full_body: "1",
   female_full_body: "1",
@@ -823,26 +815,6 @@ var POSE_TAG_FROM_CATEGORY = {
   kid_boy_face_closeup: "3",
   kid_girl_face_closeup: "3"
   // room_* categories intentionally omitted — no pose concept for furniture
-};
-var BROAD_CATEGORY = {
-  sunglasses: "eyewear",
-  eyeglasses: "eyewear",
-  mens_clothing: "clothing",
-  womens_clothing: "clothing",
-  kids_clothing: "clothing",
-  footwear: "footwear",
-  jewellery: "jewellery",
-  earrings: "jewellery",
-  bags: "accessories",
-  makeup_lipstick: "makeup",
-  makeup_foundation: "makeup",
-  makeup_mascara: "makeup",
-  bedroom_furniture: "furniture",
-  bathroom_furniture: "furniture",
-  living_room_furniture: "furniture",
-  dining_room_furniture: "furniture",
-  kitchen_furniture: "furniture",
-  home_decor: "furniture"
 };
 var PRODUCT_TYPE_LABEL = {
   sunglasses: "sunglasses",
@@ -882,6 +854,7 @@ var PersonalizationService = class {
       productImageUrl,
       productImageHash,
       productType,
+      category,
       abortSignal
     } = opts;
     const cacheKey = this.cache.resultKey(
@@ -908,7 +881,7 @@ var PersonalizationService = class {
       }
     }
     const { ENDPOINTS } = await import('./api-client-UH2EXBHR.js');
-    const isFurniture = FURNITURE_PRODUCT_TYPES.has(productType);
+    const isFurniture = category === "furniture";
     if (!jobId) {
       if (abortSignal?.aborted) {
         this.bus.emit("personalization:cancelled", {});
@@ -920,13 +893,13 @@ var PersonalizationService = class {
         form.append("user_image", userImage, "room.jpg");
         form.append("garment_image_url", productImageUrl);
         form.append("product_type", PRODUCT_TYPE_LABEL[productType] ?? productType);
-        form.append("category", "furniture");
+        form.append("category", category);
         submitPath = ENDPOINTS.submit;
       } else {
         form.append("user_image", userImage, "profile.jpg");
         form.append("garment_image_url", productImageUrl);
         form.append("product_type", PRODUCT_TYPE_LABEL[productType] ?? productType);
-        form.append("category", BROAD_CATEGORY[productType] ?? "accessories");
+        form.append("category", category);
         const poseTag = POSE_TAG_FROM_CATEGORY[userImageCategory];
         if (poseTag !== void 0) {
           form.append("tag", poseTag);
@@ -1915,11 +1888,12 @@ var PRODUCT_NEEDS = {
 function resolveCategoryFromGender(productType, gender) {
   const need = PRODUCT_NEEDS[productType];
   if (need === "room") return null;
+  const resolvedNeed = need ?? "body";
   const isMale = gender === "male" || gender === "kid_boy";
-  if (gender === "kid_boy") return need === "face" ? "kid_boy_face_closeup" : "kid_boy_full_body";
-  if (gender === "kid_girl") return need === "face" ? "kid_girl_face_closeup" : "kid_girl_full_body";
-  if (isMale) return need === "face" ? "male_face_closeup" : "male_full_body";
-  return need === "face" ? "female_face_closeup" : "female_full_body";
+  if (gender === "kid_boy") return resolvedNeed === "face" ? "kid_boy_face_closeup" : "kid_boy_full_body";
+  if (gender === "kid_girl") return resolvedNeed === "face" ? "kid_girl_face_closeup" : "kid_girl_full_body";
+  if (isMale) return resolvedNeed === "face" ? "male_face_closeup" : "male_full_body";
+  return resolvedNeed === "face" ? "female_face_closeup" : "female_full_body";
 }
 function getRequiredCategories(productType) {
   return PRODUCT_TYPE_MAPPING[productType] ?? [];
@@ -2187,18 +2161,21 @@ var PersonalizeSDK = class _PersonalizeSDK {
   }
   // ── Single-product personalization ─────────────────────────────────────────
   async personalize(opts) {
-    const { imageUrl, productType, gender, productId } = opts;
+    const { imageUrl, productType, gender, category, productId } = opts;
     const ctx = await this.resolveProduct({ imageUrl, productType, productId });
-    const resolvedCategory = resolveCategoryFromGender(ctx.productType, gender);
     let requiredCategory;
-    if (resolvedCategory === null) {
+    if (category === "furniture") {
       const eligibility = await this.getEligibility(ctx.productType);
       if (!eligibility.eligible) {
         throw normalizeError(new Error(`Product not eligible for personalization: ${eligibility.reason}`));
       }
       requiredCategory = eligibility.requiredCategory;
     } else {
-      requiredCategory = resolvedCategory;
+      if (!gender) {
+        throw normalizeError(new Error(`gender is required for category "${category}"`));
+      }
+      const resolvedCategory = resolveCategoryFromGender(ctx.productType, gender);
+      requiredCategory = resolvedCategory ?? (gender === "male" ? "male_full_body" : "female_full_body");
       const hasCategory = this.selectionSummary?.availableCategories.includes(requiredCategory);
       if (!hasCategory) {
         throw normalizeError(new Error(
@@ -2235,6 +2212,7 @@ var PersonalizeSDK = class _PersonalizeSDK {
       productImageUrl: ctx.image.imageUrl,
       productImageHash: ctx.image.imageUrl,
       productType: ctx.productType,
+      category,
       productId: ctx.productId,
       abortSignal: this.activeAbortController.signal
     });
@@ -2262,9 +2240,8 @@ var PersonalizeSDK = class _PersonalizeSDK {
   async personalizeAll(products, onResult) {
     const results = await Promise.allSettled(
       products.map(async (p) => {
-        const resolvedCategory = resolveCategoryFromGender(p.productType, p.gender);
         let requiredCategory;
-        if (resolvedCategory === null) {
+        if (p.category === "furniture") {
           const eligibility = checkEligibility(p.productType, this.selectionSummary);
           if (!eligibility.eligible) {
             const r = { productId: p.productId, status: "ineligible", reason: eligibility.reason };
@@ -2273,7 +2250,13 @@ var PersonalizeSDK = class _PersonalizeSDK {
           }
           requiredCategory = eligibility.requiredCategory;
         } else {
-          requiredCategory = resolvedCategory;
+          if (!p.gender) {
+            const r = { productId: p.productId, status: "failed", error: `gender is required for category "${p.category}"` };
+            onResult?.(r);
+            return r;
+          }
+          const resolvedCategory = resolveCategoryFromGender(p.productType, p.gender);
+          requiredCategory = resolvedCategory ?? (p.gender === "male" ? "male_full_body" : "female_full_body");
           const hasCategory = this.selectionSummary?.availableCategories.includes(requiredCategory);
           if (!hasCategory) {
             const r = { productId: p.productId, status: "ineligible", reason: "REQUIRED_USER_IMAGE_MISSING" };
@@ -2296,6 +2279,7 @@ var PersonalizeSDK = class _PersonalizeSDK {
             productImageUrl: p.imageUrl,
             productImageHash: p.imageUrl,
             productType: p.productType,
+            category: p.category,
             productId: p.productId
           });
           const r = {
