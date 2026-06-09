@@ -378,17 +378,27 @@ export class PersonalizeSDK {
     this.rateLimit.recordPersonalization(productKey);
     this.dbg.setPersonalizationState("creating_job");
 
+    // Slow threshold — fires once if no result within slowThresholdMs
+    const startedAt = Date.now();
+    const slowHandle = setTimeout(() => {
+      this.bus.emit("personalization:slow", { elapsedMs: Date.now() - startedAt });
+    }, this.config.slowThresholdMs);
+
     try {
       const result = await promise;
+      clearTimeout(slowHandle);
       this.viewMode = "personalized";
       this.bus.emit("view:changed", { mode: "personalized" });
+      this.bus.emit("personalization:all_completed", { count: 1 });
       this.dbg.setPersonalizationState("personalized", result.jobId);
       return result;
     } catch (e) {
+      clearTimeout(slowHandle);
       const err = normalizeError(e);
       this.dbg.setPersonalizationState("failed", null, err.message);
       this.analytics.personalizationFailed(err.message, err.code);
       this.bus.emit("personalization:failed", { error: err.message, code: err.code });
+      this.bus.emit("personalization:all_completed", { count: 1 });
       this.bus.emit("error", err);
       throw err;
     } finally {
@@ -402,6 +412,12 @@ export class PersonalizeSDK {
     products: BatchProduct[],
     onResult?: (result: BatchResult) => void,
   ): Promise<BatchResult[]> {
+    // Single slow timer for the whole batch — fires once if any job is still running after slowThresholdMs
+    const batchStartedAt = Date.now();
+    const slowHandle = setTimeout(() => {
+      this.bus.emit("personalization:slow", { elapsedMs: Date.now() - batchStartedAt });
+    }, this.config.slowThresholdMs);
+
     const results = await Promise.allSettled(
       products.map(async (p): Promise<BatchResult> => {
         // Resolve category from gender (person) or productType (furniture)
@@ -473,9 +489,14 @@ export class PersonalizeSDK {
       }),
     );
 
-    return results.map((r) =>
-      r.status === "fulfilled" ? r.value : { productId: "unknown", status: "failed", error: String(r.reason) },
+    clearTimeout(slowHandle);
+
+    const mapped: BatchResult[] = results.map((r) =>
+      r.status === "fulfilled" ? r.value : { productId: "unknown", status: "failed" as const, error: String(r.reason) },
     );
+
+    this.bus.emit("personalization:all_completed", { count: mapped.length });
+    return mapped;
   }
 
   // ── View helpers ────────────────────────────────────────────────────────────

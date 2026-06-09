@@ -1203,22 +1203,13 @@ var PersonalizationService = class {
     const statusPath = `${ENDPOINTS2.status}/${jobId}`;
     return new Promise((resolve, reject) => {
       let settled = false;
-      const pollingStartedAt = Date.now();
       const timeoutMs = this.config.pollIntervalMs * this.config.pollMaxAttempts;
       const timeoutHandle = setTimeout(() => {
         if (settled) return;
         settled = true;
-        clearTimeout(slowHandle);
         void this.cache.clearActiveJob(activeJobKey);
         reject(jobTimeoutError(this.config.pollMaxAttempts));
       }, timeoutMs);
-      const slowHandle = setTimeout(() => {
-        if (settled) return;
-        this.bus.emit("personalization:slow", {
-          jobId,
-          elapsedMs: Date.now() - pollingStartedAt
-        });
-      }, this.config.slowThresholdMs);
       this.api.stream(
         statusPath,
         async (event) => {
@@ -1228,7 +1219,6 @@ var PersonalizationService = class {
           if (status === "COMPLETED" && resultUrl) {
             settled = true;
             clearTimeout(timeoutHandle);
-            clearTimeout(slowHandle);
             const clean = `${resultUrl.split("?")[0]}?t=${Date.now()}`;
             await this.cache.setResult(cacheKey, clean, this.config.cache.resultTtlMs);
             await this.cache.clearActiveJob(activeJobKey);
@@ -1239,7 +1229,6 @@ var PersonalizationService = class {
           if (status === "FAILED") {
             settled = true;
             clearTimeout(timeoutHandle);
-            clearTimeout(slowHandle);
             await this.cache.clearActiveJob(activeJobKey);
             const message = event.message ?? "Try-on job failed on server";
             reject(jobFailedError({ jobId, message }));
@@ -1250,7 +1239,6 @@ var PersonalizationService = class {
         if (settled) return;
         settled = true;
         clearTimeout(timeoutHandle);
-        clearTimeout(slowHandle);
         void this.cache.clearActiveJob(activeJobKey);
         if (e.name === "AbortError") {
           this.bus.emit("personalization:cancelled", { jobId: jobId ?? void 0 });
@@ -2560,17 +2548,25 @@ var PersonalizeSDK = class _PersonalizeSDK {
     this.rateLimit.registerInFlight(productKey, promise);
     this.rateLimit.recordPersonalization(productKey);
     this.dbg.setPersonalizationState("creating_job");
+    const startedAt = Date.now();
+    const slowHandle = setTimeout(() => {
+      this.bus.emit("personalization:slow", { elapsedMs: Date.now() - startedAt });
+    }, this.config.slowThresholdMs);
     try {
       const result = await promise;
+      clearTimeout(slowHandle);
       this.viewMode = "personalized";
       this.bus.emit("view:changed", { mode: "personalized" });
+      this.bus.emit("personalization:all_completed", { count: 1 });
       this.dbg.setPersonalizationState("personalized", result.jobId);
       return result;
     } catch (e) {
+      clearTimeout(slowHandle);
       const err = normalizeError(e);
       this.dbg.setPersonalizationState("failed", null, err.message);
       this.analytics.personalizationFailed(err.message, err.code);
       this.bus.emit("personalization:failed", { error: err.message, code: err.code });
+      this.bus.emit("personalization:all_completed", { count: 1 });
       this.bus.emit("error", err);
       throw err;
     } finally {
@@ -2579,6 +2575,10 @@ var PersonalizeSDK = class _PersonalizeSDK {
   }
   // ── Batch personalization ───────────────────────────────────────────────────
   async personalizeAll(products, onResult) {
+    const batchStartedAt = Date.now();
+    const slowHandle = setTimeout(() => {
+      this.bus.emit("personalization:slow", { elapsedMs: Date.now() - batchStartedAt });
+    }, this.config.slowThresholdMs);
     const results = await Promise.allSettled(
       products.map(async (p) => {
         let requiredCategory;
@@ -2643,9 +2643,12 @@ var PersonalizeSDK = class _PersonalizeSDK {
         }
       })
     );
-    return results.map(
+    clearTimeout(slowHandle);
+    const mapped = results.map(
       (r) => r.status === "fulfilled" ? r.value : { productId: "unknown", status: "failed", error: String(r.reason) }
     );
+    this.bus.emit("personalization:all_completed", { count: mapped.length });
+    return mapped;
   }
   // ── Events ──────────────────────────────────────────────────────────────────
   on(event, handler) {

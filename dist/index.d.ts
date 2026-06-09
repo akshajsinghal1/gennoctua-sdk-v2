@@ -266,9 +266,13 @@ type SDKEventMap = {
     "personalization:rate_limited": {
         reason: string;
     };
+    /** Fired after slowThresholdMs (default 15s) with no result. Show a "taking a moment" message. */
     "personalization:slow": {
-        jobId: string;
         elapsedMs: number;
+    };
+    /** Fired when personalize() or personalizeAll() fully completes. Hide the slow message here. */
+    "personalization:all_completed": {
+        count: number;
     };
     "view:changed": {
         mode: ViewMode;

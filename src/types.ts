@@ -360,7 +360,10 @@ export type SDKEventMap = {
   "personalization:failed": { error: string; code: string };
   "personalization:cancelled": { jobId?: string };
   "personalization:rate_limited": { reason: string };
-  "personalization:slow": { jobId: string; elapsedMs: number };
+  /** Fired after slowThresholdMs (default 15s) with no result. Show a "taking a moment" message. */
+  "personalization:slow": { elapsedMs: number };
+  /** Fired when personalize() or personalizeAll() fully completes. Hide the slow message here. */
+  "personalization:all_completed": { count: number };
 
   // Rendering
   "view:changed": { mode: ViewMode };
