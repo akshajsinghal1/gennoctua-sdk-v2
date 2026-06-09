@@ -198,15 +198,26 @@ export class PersonalizationService {
 
     return new Promise((resolve, reject) => {
       let settled = false;
+      const pollingStartedAt = Date.now();
 
       // Timeout safety net
       const timeoutMs = this.config.pollIntervalMs * this.config.pollMaxAttempts;
       const timeoutHandle = setTimeout(() => {
         if (settled) return;
         settled = true;
+        clearTimeout(slowHandle);
         void this.cache.clearActiveJob(activeJobKey);
         reject(jobTimeoutError(this.config.pollMaxAttempts));
       }, timeoutMs);
+
+      // Slow threshold — fires if result hasn't arrived within slowThresholdMs
+      const slowHandle = setTimeout(() => {
+        if (settled) return;
+        this.bus.emit("personalization:slow", {
+          jobId: jobId!,
+          elapsedMs: Date.now() - pollingStartedAt,
+        });
+      }, this.config.slowThresholdMs);
 
       this.api.stream(
         statusPath,
@@ -218,6 +229,7 @@ export class PersonalizationService {
           if (status === "COMPLETED" && resultUrl) {
             settled = true;
             clearTimeout(timeoutHandle);
+            clearTimeout(slowHandle);
             const clean = `${resultUrl.split("?")[0]}?t=${Date.now()}`;
             await this.cache.setResult(cacheKey, clean, this.config.cache.resultTtlMs);
             await this.cache.clearActiveJob(activeJobKey);
@@ -229,6 +241,7 @@ export class PersonalizationService {
           if (status === "FAILED") {
             settled = true;
             clearTimeout(timeoutHandle);
+            clearTimeout(slowHandle);
             await this.cache.clearActiveJob(activeJobKey);
             const message = (event.message as string | undefined) ?? "Try-on job failed on server";
             reject(jobFailedError({ jobId, message }));
@@ -239,6 +252,7 @@ export class PersonalizationService {
         if (settled) return;
         settled = true;
         clearTimeout(timeoutHandle);
+        clearTimeout(slowHandle);
         void this.cache.clearActiveJob(activeJobKey);
         if ((e as Error).name === "AbortError") {
           this.bus.emit("personalization:cancelled", { jobId: jobId ?? undefined });

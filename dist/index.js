@@ -5,6 +5,7 @@ export { SDKError } from './chunk-YYLNIUP2.js';
 var DEFAULT_MAX_IMAGES = 80;
 var DEFAULT_POLL_INTERVAL_MS = 1500;
 var DEFAULT_POLL_MAX_ATTEMPTS = 120;
+var DEFAULT_SLOW_THRESHOLD_MS = 15e3;
 var DEFAULT_RESULT_TTL_MS = 7 * 24 * 60 * 60 * 1e3;
 var DEFAULT_SELECTION_TTL_MS = 24 * 60 * 60 * 1e3;
 var DEFAULT_ACTIVE_JOB_MAX_AGE_MS = 5 * 60 * 1e3;
@@ -47,7 +48,8 @@ function resolveConfig(config) {
     debug: config.debug ?? false,
     maxImages: config.maxImages ?? DEFAULT_MAX_IMAGES,
     pollIntervalMs: config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
-    pollMaxAttempts: config.pollMaxAttempts ?? DEFAULT_POLL_MAX_ATTEMPTS
+    pollMaxAttempts: config.pollMaxAttempts ?? DEFAULT_POLL_MAX_ATTEMPTS,
+    slowThresholdMs: config.slowThresholdMs ?? DEFAULT_SLOW_THRESHOLD_MS
   };
 }
 function resolvePersonalizationMode(mode) {
@@ -917,13 +919,22 @@ var PersonalizationService = class {
     const statusPath = `${ENDPOINTS.status}/${jobId}`;
     return new Promise((resolve, reject) => {
       let settled = false;
+      const pollingStartedAt = Date.now();
       const timeoutMs = this.config.pollIntervalMs * this.config.pollMaxAttempts;
       const timeoutHandle = setTimeout(() => {
         if (settled) return;
         settled = true;
+        clearTimeout(slowHandle);
         void this.cache.clearActiveJob(activeJobKey);
         reject(jobTimeoutError(this.config.pollMaxAttempts));
       }, timeoutMs);
+      const slowHandle = setTimeout(() => {
+        if (settled) return;
+        this.bus.emit("personalization:slow", {
+          jobId,
+          elapsedMs: Date.now() - pollingStartedAt
+        });
+      }, this.config.slowThresholdMs);
       this.api.stream(
         statusPath,
         async (event) => {
@@ -933,6 +944,7 @@ var PersonalizationService = class {
           if (status === "COMPLETED" && resultUrl) {
             settled = true;
             clearTimeout(timeoutHandle);
+            clearTimeout(slowHandle);
             const clean = `${resultUrl.split("?")[0]}?t=${Date.now()}`;
             await this.cache.setResult(cacheKey, clean, this.config.cache.resultTtlMs);
             await this.cache.clearActiveJob(activeJobKey);
@@ -943,6 +955,7 @@ var PersonalizationService = class {
           if (status === "FAILED") {
             settled = true;
             clearTimeout(timeoutHandle);
+            clearTimeout(slowHandle);
             await this.cache.clearActiveJob(activeJobKey);
             const message = event.message ?? "Try-on job failed on server";
             reject(jobFailedError({ jobId, message }));
@@ -953,6 +966,7 @@ var PersonalizationService = class {
         if (settled) return;
         settled = true;
         clearTimeout(timeoutHandle);
+        clearTimeout(slowHandle);
         void this.cache.clearActiveJob(activeJobKey);
         if (e.name === "AbortError") {
           this.bus.emit("personalization:cancelled", { jobId: jobId ?? void 0 });

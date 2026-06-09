@@ -4,6 +4,7 @@ import type { PersonalizationMode, SDKConfig } from "./types.js";
 const DEFAULT_MAX_IMAGES = 80;
 const DEFAULT_POLL_INTERVAL_MS = 1500;
 const DEFAULT_POLL_MAX_ATTEMPTS = 120;
+const DEFAULT_SLOW_THRESHOLD_MS = 15_000;  // 15s
 const DEFAULT_RESULT_TTL_MS = 7 * 24 * 60 * 60 * 1000;    // 7 days
 const DEFAULT_SELECTION_TTL_MS = 24 * 60 * 60 * 1000;      // 24 hours
 const DEFAULT_ACTIVE_JOB_MAX_AGE_MS = 5 * 60 * 1000;       // 5 minutes
@@ -65,6 +66,7 @@ export function resolveConfig(config: SDKConfig): ResolvedConfig {
     maxImages: config.maxImages ?? DEFAULT_MAX_IMAGES,
     pollIntervalMs: config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS,
     pollMaxAttempts: config.pollMaxAttempts ?? DEFAULT_POLL_MAX_ATTEMPTS,
+    slowThresholdMs: config.slowThresholdMs ?? DEFAULT_SLOW_THRESHOLD_MS,
   };
 }
 

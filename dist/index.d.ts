@@ -215,6 +215,7 @@ type SDKConfig = {
     maxImages?: number;
     pollIntervalMs?: number;
     pollMaxAttempts?: number;
+    slowThresholdMs?: number;
 };
 type SDKEventMap = {
     "upload:started": {
@@ -264,6 +265,10 @@ type SDKEventMap = {
     };
     "personalization:rate_limited": {
         reason: string;
+    };
+    "personalization:slow": {
+        jobId: string;
+        elapsedMs: number;
     };
     "view:changed": {
         mode: ViewMode;

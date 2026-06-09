@@ -329,6 +329,7 @@ export type SDKConfig = {
   maxImages?: number;           // default: 80
   pollIntervalMs?: number;      // default: 1500
   pollMaxAttempts?: number;     // default: 120
+  slowThresholdMs?: number;     // default: 15000 — ms after polling starts before "personalization:slow" fires
 };
 
 // ─── SDK Events ───────────────────────────────────────────────────────────────
@@ -359,6 +360,7 @@ export type SDKEventMap = {
   "personalization:failed": { error: string; code: string };
   "personalization:cancelled": { jobId?: string };
   "personalization:rate_limited": { reason: string };
+  "personalization:slow": { jobId: string; elapsedMs: number };
 
   // Rendering
   "view:changed": { mode: ViewMode };
