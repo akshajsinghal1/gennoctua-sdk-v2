@@ -135,11 +135,46 @@ export type SelectedImageAsset = {
   createdAt: string;
 };
 
+/**
+ * Reason a photo was skipped or couldn't be used during profile selection.
+ * Only reasons with count > 0 are included in SelectionSummary.rejectionReasons.
+ *
+ * - no_face_detected      — face-api found no face in the photo
+ * - multiple_people       — more than one person detected (face or body level)
+ * - low_gender_confidence — face found but gender was ambiguous (side profile, blurry, masked)
+ * - not_front_facing      — body detected but person is turned sideways / angled away
+ * - no_full_body          — facing camera but full body not visible (too cropped / far away)
+ */
+export type RejectionReasonCode =
+  | "no_face_detected"
+  | "multiple_people"
+  | "low_gender_confidence"
+  | "not_front_facing"
+  | "no_full_body";
+
+export type RejectionReason = {
+  reason: RejectionReasonCode;
+  /** Number of uploaded photos that had this rejection reason. */
+  count: number;
+};
+
 export type SelectionSummary = {
   availableCategories: UserImageCategory[];
   missingCategories: UserImageCategory[];
   totalUploaded: number;
   totalSelected: number;
+  /**
+   * Per-reason count of why photos were skipped during profile selection.
+   * Only includes reasons with count > 0.
+   * Empty array when all photos were accepted, when running in furniture-only
+   * mode (no face detection), or when the profile was restored from cache.
+   *
+   * @example
+   * if (summary.rejectionReasons.find(r => r.reason === "multiple_people")) {
+   *   showToast("Please upload individual photos, not group shots.");
+   * }
+   */
+  rejectionReasons: RejectionReason[];
 };
 
 // ─── Eligibility ──────────────────────────────────────────────────────────────

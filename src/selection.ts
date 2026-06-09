@@ -14,6 +14,7 @@
 
 import type {
   PersonalizationMode,
+  RejectionReasonCode,
   SelectedImageAsset,
   TopRoomCandidate,
   TopRoomCandidatesMap,
@@ -144,6 +145,9 @@ export type TopCandidatesMap = {
 
 export type SelectionOutput = {
   assets: SelectedImageAsset[];
+  /** Per-reason count of why photos were rejected during pipeline processing.
+   *  Passed up to SelectionSummary.rejectionReasons (non-zero entries only). */
+  rejections: Record<RejectionReasonCode, number>;
   /** Top-5 person candidates per gender/age group for optional LLM refinement. */
   topCandidates: TopCandidatesMap;
   /**
@@ -497,8 +501,13 @@ async function getPoseAssessment(file: File, detector: PoseDetector): Promise<Po
 
     const result = detector.detect(canvas);
 
-    // Reject multi-person frames
-    if (!result?.landmarks?.length || result.landmarks.length > 1) return fallback;
+    // No pose detected at all
+    if (!result?.landmarks?.length) return fallback;
+
+    // Reject multi-person frames — distinct label so rejections can be counted separately
+    if (result.landmarks.length > 1) {
+      return { frontScore: 0, frontLabel: "side_facing", poseRank: 0, poseLabel: "multiple_poses" };
+    }
 
     return rankPoseCandidate(result.landmarks[0]);
   } catch {
@@ -521,6 +530,15 @@ export async function selectImages(
       recoverable: true,
     });
   }
+
+  // ── Rejection counters — tracked throughout the pipeline ──────────────────
+  const rejections: Record<RejectionReasonCode, number> = {
+    no_face_detected:      0,
+    multiple_people:       0,
+    low_gender_confidence: 0,
+    not_front_facing:      0,
+    no_full_body:          0,
+  };
 
   // ── Derive which pipelines to run based on personalizationMode ──────────────
   // "all" or not provided → run both pipelines on every photo
@@ -590,12 +608,12 @@ export async function selectImages(
       );
 
       for (const { file, faces } of batchResults) {
-        if (faces.length === 0) continue;
-        if (faces.length !== 1) continue; // multiple people — skip
+        if (faces.length === 0) { rejections.no_face_detected++; continue; }
+        if (faces.length !== 1) { rejections.multiple_people++;  continue; } // group photo
 
         const face = faces[0];
         const gender = face.gender === "male" || face.gender === "female" ? face.gender : null;
-        if (!gender || (face.genderProbability ?? 0) < 0.7) continue;
+        if (!gender || (face.genderProbability ?? 0) < 0.7) { rejections.low_gender_confidence++; continue; }
 
         // Face area ratio — how much of the frame the face occupies.
         // box.width/height are in pixels; imageWidth/imageHeight give frame size.
@@ -634,6 +652,19 @@ export async function selectImages(
       });
 
       const assessment = await getPoseAssessment(preCandidates[i].file, pose);
+
+      // Track pose-level rejections
+      if (assessment.poseLabel === "multiple_poses") {
+        rejections.multiple_people++;
+      } else if (assessment.poseLabel === "not_front_facing") {
+        rejections.not_front_facing++;
+      } else if (
+        assessment.poseLabel === "insufficient_keypoints" ||
+        assessment.poseLabel === "shoulder_too_narrow"
+      ) {
+        rejections.no_full_body++;
+      }
+
       candidates.push({ ...preCandidates[i], ...assessment });
     }
   }
@@ -932,5 +963,5 @@ export async function selectImages(
   };
 
   onProgress?.({ phase: "complete", message: "Selection complete." });
-  return { assets: results, topCandidates, topRoomCandidates };
+  return { assets: results, topCandidates, topRoomCandidates, rejections };
 }

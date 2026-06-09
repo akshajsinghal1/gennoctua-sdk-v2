@@ -1753,7 +1753,10 @@ async function getPoseAssessment(file, detector) {
     if (!ctx) return fallback;
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     const result = detector.detect(canvas);
-    if (!result?.landmarks?.length || result.landmarks.length > 1) return fallback;
+    if (!result?.landmarks?.length) return fallback;
+    if (result.landmarks.length > 1) {
+      return { frontScore: 0, frontLabel: "side_facing", poseRank: 0, poseLabel: "multiple_poses" };
+    }
     return rankPoseCandidate(result.landmarks[0]);
   } catch {
     return fallback;
@@ -1768,6 +1771,13 @@ async function selectImages(fileList, onProgress, personalizationMode) {
       recoverable: true
     });
   }
+  const rejections = {
+    no_face_detected: 0,
+    multiple_people: 0,
+    low_gender_confidence: 0,
+    not_front_facing: 0,
+    no_full_body: 0
+  };
   const modes = personalizationMode ?? ["all"];
   const hasAll = modes.includes("all");
   const hasFurniture = modes.includes("furniture");
@@ -1801,11 +1811,20 @@ async function selectImages(fileList, onProgress, personalizationMode) {
         })
       );
       for (const { file, faces } of batchResults) {
-        if (faces.length === 0) continue;
-        if (faces.length !== 1) continue;
+        if (faces.length === 0) {
+          rejections.no_face_detected++;
+          continue;
+        }
+        if (faces.length !== 1) {
+          rejections.multiple_people++;
+          continue;
+        }
         const face = faces[0];
         const gender = face.gender === "male" || face.gender === "female" ? face.gender : null;
-        if (!gender || (face.genderProbability ?? 0) < 0.7) continue;
+        if (!gender || (face.genderProbability ?? 0) < 0.7) {
+          rejections.low_gender_confidence++;
+          continue;
+        }
         const box = face.detection?.box;
         const iw = face.detection?.imageWidth ?? 1;
         const ih = face.detection?.imageHeight ?? 1;
@@ -1832,6 +1851,13 @@ async function selectImages(fileList, onProgress, personalizationMode) {
         total: preCandidates.length
       });
       const assessment = await getPoseAssessment(preCandidates[i].file, pose);
+      if (assessment.poseLabel === "multiple_poses") {
+        rejections.multiple_people++;
+      } else if (assessment.poseLabel === "not_front_facing") {
+        rejections.not_front_facing++;
+      } else if (assessment.poseLabel === "insufficient_keypoints" || assessment.poseLabel === "shoulder_too_narrow") {
+        rejections.no_full_body++;
+      }
       candidates.push({ ...preCandidates[i], ...assessment });
     }
   }
@@ -2031,7 +2057,7 @@ async function selectImages(fileList, onProgress, personalizationMode) {
     kid_girl: candidates.filter((c) => c.gender === "female" && c.age < 13).sort(adultSort).slice(0, 5).map(toTopCandidate)
   };
   onProgress?.({ phase: "complete", message: "Selection complete." });
-  return { assets: results, topCandidates, topRoomCandidates };
+  return { assets: results, topCandidates, topRoomCandidates, rejections };
 }
 
 // src/tagging.ts
@@ -2305,6 +2331,13 @@ var PersonalizeSDK = class _PersonalizeSDK {
     let assets;
     let topCandidates;
     let topRoomCandidates;
+    let selectionRejections = {
+      no_face_detected: 0,
+      multiple_people: 0,
+      low_gender_confidence: 0,
+      not_front_facing: 0,
+      no_full_body: 0
+    };
     try {
       const output = await selectImages(
         fileList,
@@ -2317,6 +2350,7 @@ var PersonalizeSDK = class _PersonalizeSDK {
       assets = output.assets;
       topCandidates = output.topCandidates;
       topRoomCandidates = output.topRoomCandidates;
+      selectionRejections = output.rejections;
     } catch (e) {
       const err = normalizeError(e);
       this.bus.emit("upload:failed", { error: err.message });
@@ -2347,11 +2381,13 @@ var PersonalizeSDK = class _PersonalizeSDK {
     void this.uploadProfilesInBackground(taggedAssets);
     const available = [...new Set(taggedAssets.map((a) => a.category))];
     const missing = allCategories.filter((c) => !available.includes(c));
+    const rejectionReasons = Object.entries(selectionRejections).filter(([, count]) => count > 0).map(([reason, count]) => ({ reason, count }));
     this.selectionSummary = {
       availableCategories: available,
       missingCategories: missing,
       totalUploaded: fileCount,
-      totalSelected: taggedAssets.length
+      totalSelected: taggedAssets.length,
+      rejectionReasons
     };
     this.analytics.selectionCompleted(fileCount, assets.length, available);
     this.bus.emit("upload:completed", { fileCount, validCount: assets.length });
@@ -2411,7 +2447,9 @@ var PersonalizeSDK = class _PersonalizeSDK {
         missingCategories: missing,
         totalUploaded: 0,
         // unknown on restore
-        totalSelected: cached.assets.length
+        totalSelected: cached.assets.length,
+        rejectionReasons: []
+        // no pipeline ran — profile came from cache
       };
       this.dbg.setSelectionSummary(this.selectionSummary, null);
       this.bus.emit("selection:completed", this.selectionSummary);

@@ -23,6 +23,8 @@ import type {
   HpCategory,
   UserGender,
   SelectionSummary,
+  RejectionReason,
+  RejectionReasonCode,
   EligibilityResult,
   PersonalizationResult,
   ViewMode,
@@ -110,6 +112,10 @@ export class PersonalizeSDK {
     let assets: SelectedImageAsset[];
     let topCandidates: TopCandidatesMap;
     let topRoomCandidates: TopRoomCandidatesMap;
+    let selectionRejections: Record<RejectionReasonCode, number> = {
+      no_face_detected: 0, multiple_people: 0,
+      low_gender_confidence: 0, not_front_facing: 0, no_full_body: 0,
+    };
     try {
       const output = await selectImages(
         fileList,
@@ -122,6 +128,7 @@ export class PersonalizeSDK {
       assets = output.assets;
       topCandidates = output.topCandidates;
       topRoomCandidates = output.topRoomCandidates;
+      selectionRejections = output.rejections;
     } catch (e) {
       const err = normalizeError(e);
       this.bus.emit("upload:failed", { error: err.message });
@@ -153,11 +160,18 @@ export class PersonalizeSDK {
     const available = [...new Set(taggedAssets.map((a) => a.category))];
     const missing = allCategories.filter((c) => !available.includes(c));
 
+    const rejectionReasons: RejectionReason[] = (
+      Object.entries(selectionRejections) as [RejectionReasonCode, number][]
+    )
+      .filter(([, count]) => count > 0)
+      .map(([reason, count]) => ({ reason, count }));
+
     this.selectionSummary = {
       availableCategories: available,
       missingCategories: missing,
       totalUploaded: fileCount,
       totalSelected: taggedAssets.length,
+      rejectionReasons,
     };
 
     this.analytics.selectionCompleted(fileCount, assets.length, available);
@@ -223,6 +237,7 @@ export class PersonalizeSDK {
         missingCategories: missing,
         totalUploaded: 0,   // unknown on restore
         totalSelected: cached.assets.length,
+        rejectionReasons: [], // no pipeline ran — profile came from cache
       };
 
       this.dbg.setSelectionSummary(this.selectionSummary, null);
