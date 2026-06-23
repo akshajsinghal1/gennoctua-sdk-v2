@@ -1,5 +1,5 @@
-import { ApiClient, normalizeError, cacheError, rateLimitedError, SDKError, jobFailedError, jobTimeoutError, configError } from './chunk-YYLNIUP2.js';
-export { SDKError } from './chunk-YYLNIUP2.js';
+import { ApiClient, normalizeError, cacheError, rateLimitedError, SDKError, jobFailedError, jobTimeoutError, configError } from './chunk-FEUGMCHC.js';
+export { SDKError } from './chunk-FEUGMCHC.js';
 
 // src/config.ts
 var DEFAULT_MAX_IMAGES = 80;
@@ -882,7 +882,7 @@ var PersonalizationService = class {
         console.info(`[personalize-sdk] Restoring active job ${jobId}`);
       }
     }
-    const { ENDPOINTS } = await import('./api-client-UH2EXBHR.js');
+    const { ENDPOINTS } = await import('./api-client-CWBCPQDI.js');
     const isFurniture = category === "furniture";
     if (!jobId) {
       if (abortSignal?.aborted) {
@@ -1242,7 +1242,7 @@ var MEDIAPIPE_TASKS_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@
 var MEDIAPIPE_TASKS_WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm";
 var POSE_MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/1/pose_landmarker_full.task";
 var MAX_IMAGES = 80;
-var POSE_FRONT_FACING_MIN_SCORE = 80;
+var POSE_FRONT_FACING_MIN_SCORE = 65;
 var KP_MIN_CONF = 0.16;
 var KP_LOWER_MIN_CONF = 0.28;
 var POSE_SHOULDER_LEVEL_MAX = 0.08;

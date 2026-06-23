@@ -37,7 +37,7 @@ const MAX_IMAGES = 80;
 // ─── Pose Thresholds (ported from westside production) ────────────────────────
 
 /** Minimum front-facing score to qualify for full-body selection */
-const POSE_FRONT_FACING_MIN_SCORE = 80;
+const POSE_FRONT_FACING_MIN_SCORE = 65;
 /** General keypoint visibility confidence minimum */
 const KP_MIN_CONF = 0.16;
 /** Higher confidence required for lower-body keypoints (knees, ankles) */
