@@ -14,6 +14,7 @@ import type { TopRoomCandidatesMap } from "./types.js";
 import { FallbackTaggingService } from "./tagging.js";
 import { checkEligibility, resolveCategoryFromGender } from "./mapping.js";
 import { normalizeError, rateLimitedError } from "./errors.js";
+import { clusterScanIndex, pickMeasurementShortlists, type MeasurementPickOptions } from "./measurement.js";
 import type {
   SDKConfig,
   SDKEventName,
@@ -32,6 +33,9 @@ import type {
   BatchResult,
   SelectedImageAsset,
   UserImageCategory,
+  ScanIndexEntry,
+  ProfileMeasurementShortlists,
+  MeasurementCluster,
 } from "./types.js";
 
 // ─── PersonalizeSDK ───────────────────────────────────────────────────────────
@@ -54,6 +58,8 @@ export class PersonalizeSDK {
   // Mutable state
   private selectedAssets: SelectedImageAsset[] = [];
   private selectionSummary: SelectionSummary | null = null;
+  /** v0.2+: full ingest scan for measurement handoff */
+  private scanIndex: ScanIndexEntry[] = [];
   private currentProductContext: ProductContext | null = null;
   private viewMode: ViewMode = "original";
   private activeAbortController: AbortController | null = null;
@@ -112,6 +118,7 @@ export class PersonalizeSDK {
     let assets: SelectedImageAsset[];
     let topCandidates: TopCandidatesMap;
     let topRoomCandidates: TopRoomCandidatesMap;
+    let scanIndex: ScanIndexEntry[] = [];
     let selectionRejections: Record<RejectionReasonCode, number> = {
       no_face_detected: 0, multiple_people: 0,
       low_gender_confidence: 0, not_front_facing: 0, no_full_body: 0,
@@ -128,6 +135,7 @@ export class PersonalizeSDK {
       assets = output.assets;
       topCandidates = output.topCandidates;
       topRoomCandidates = output.topRoomCandidates;
+      scanIndex = output.scanIndex ?? [];
       selectionRejections = output.rejections;
     } catch (e) {
       const err = normalizeError(e);
@@ -153,6 +161,7 @@ export class PersonalizeSDK {
     taggedAssets = await this.refineRoomsWithLLM(taggedAssets, topRoomCandidates);
 
     this.selectedAssets = taggedAssets;
+    this.scanIndex = scanIndex;
 
     // Pre-upload profiles to GCS in background — no await, won't block the caller
     void this.uploadProfilesInBackground(taggedAssets);
@@ -172,6 +181,7 @@ export class PersonalizeSDK {
       totalUploaded: fileCount,
       totalSelected: taggedAssets.length,
       rejectionReasons,
+      scanIndexCount: scanIndex.length,
     };
 
     this.analytics.selectionCompleted(fileCount, assets.length, available);
@@ -180,13 +190,12 @@ export class PersonalizeSDK {
     this.dbg.setSelectionSummary(this.selectionSummary, null);
 
     // Persist profile so returning users skip the AI pipeline entirely.
-    // Blobs are stored natively in IndexedDB — no base64 conversion needed.
-    // GCS URLs are patched in incrementally as background uploads complete.
     void this.cacheService.saveProfile(
       this.orgId,
       taggedAssets,
       Object.fromEntries(this.profileUrlCache),
       this.config.cache.selectionTtlMs,
+      scanIndex,
     ).catch(() => { /* ignore cache errors */ });
 
     return this.selectionSummary;
@@ -208,6 +217,7 @@ export class PersonalizeSDK {
       if (!cached || cached.assets.length === 0) return null;
 
       this.selectedAssets = cached.assets;
+      this.scanIndex = cached.scanIndex ?? [];
 
       // Restore GCS URL cache so personalize() avoids re-uploading blobs
       for (const [hash, url] of Object.entries(cached.profileUrls)) {
@@ -235,9 +245,10 @@ export class PersonalizeSDK {
       this.selectionSummary = {
         availableCategories: available,
         missingCategories: missing,
-        totalUploaded: 0,   // unknown on restore
+        totalUploaded: 0,
         totalSelected: cached.assets.length,
-        rejectionReasons: [], // no pipeline ran — profile came from cache
+        rejectionReasons: [],
+        scanIndexCount: this.scanIndex.length,
       };
 
       this.dbg.setSelectionSummary(this.selectionSummary, null);
@@ -527,6 +538,37 @@ export class PersonalizeSDK {
   selection = {
     getSummary: (): SelectionSummary | null => this.selectionSummary,
     getAssets: (): SelectedImageAsset[] => [...this.selectedAssets],
+  };
+
+  /** v0.2+: measurement handoff — cluster + body/face shortlists from scanIndex (no re-inference). */
+  measurement = {
+    getScanIndex: (): ScanIndexEntry[] => [...this.scanIndex],
+    cluster: (): MeasurementCluster[] => clusterScanIndex(this.scanIndex),
+    getPhotoShortlists: (options?: MeasurementPickOptions): ProfileMeasurementShortlists => {
+      const profileHashes: Record<string, string> = { ...(options?.profileHashes ?? {}) };
+      if (!Object.keys(profileHashes).length) {
+        const mapCat: Partial<Record<UserImageCategory, string>> = {
+          male_full_body: "male",
+          male_face_closeup: "male",
+          female_full_body: "female",
+          female_face_closeup: "female",
+          kid_boy_full_body: "kid_boy",
+          kid_boy_face_closeup: "kid_boy",
+          kid_girl_full_body: "kid_girl",
+          kid_girl_face_closeup: "kid_girl",
+        };
+        for (const asset of this.selectedAssets) {
+          const key = mapCat[asset.category];
+          if (key && !profileHashes[asset.hash]) profileHashes[asset.hash] = key;
+        }
+      }
+      return pickMeasurementShortlists(this.scanIndex, {
+        ...options,
+        profileHashes,
+      });
+    },
+    prepare: (options?: MeasurementPickOptions): ProfileMeasurementShortlists =>
+      this.measurement.getPhotoShortlists(options),
   };
 
   // ── Product ─────────────────────────────────────────────────────────────────
@@ -835,6 +877,7 @@ export class PersonalizeSDK {
     this.cancel();
     this.selectedAssets = [];
     this.selectionSummary = null;
+    this.scanIndex = [];
     this.profileUrlCache.clear();
     this.currentProductContext = null;
     this.viewMode = "original";

@@ -36,6 +36,8 @@ type ProfileRecord = {
   assets: SelectedImageAsset[];
   /** hash → GCS URL, populated as background uploads complete */
   profileUrls: Record<string, string>;
+  /** v0.2+: persisted scan index for measurement handoff */
+  scanIndex?: import("./types.js").ScanIndexEntry[];
   cachedAt: number;
   ttlMs: number;
 };
@@ -240,11 +242,13 @@ export class CacheService {
     assets: SelectedImageAsset[],
     profileUrls: Record<string, string>,
     ttlMs: number,
+    scanIndex?: import("./types.js").ScanIndexEntry[],
   ): Promise<void> {
     await this.idbPut(STORE.selected_images, {
       key: this.profileKey(orgId),
       assets,
       profileUrls,
+      scanIndex,
       cachedAt: Date.now(),
       ttlMs,
     });
@@ -252,7 +256,11 @@ export class CacheService {
 
   async loadProfile(
     orgId: string,
-  ): Promise<{ assets: SelectedImageAsset[]; profileUrls: Record<string, string> } | null> {
+  ): Promise<{
+    assets: SelectedImageAsset[];
+    profileUrls: Record<string, string>;
+    scanIndex?: import("./types.js").ScanIndexEntry[];
+  } | null> {
     const record = await this.idbGet<ProfileRecord>(
       STORE.selected_images,
       this.profileKey(orgId),
@@ -262,7 +270,11 @@ export class CacheService {
       await this.idbDelete(STORE.selected_images, record.key);
       return null;
     }
-    return { assets: record.assets, profileUrls: record.profileUrls ?? {} };
+    return {
+      assets: record.assets,
+      profileUrls: record.profileUrls ?? {},
+      scanIndex: record.scanIndex,
+    };
   }
 
   /**

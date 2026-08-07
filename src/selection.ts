@@ -15,11 +15,13 @@
 import type {
   PersonalizationMode,
   RejectionReasonCode,
+  ScanIndexEntry,
   SelectedImageAsset,
   TopRoomCandidate,
   TopRoomCandidatesMap,
   UserImageCategory,
 } from "./types.js";
+import { buildScanIndexFromCandidates } from "./measurement.js";
 import { SDKError } from "./errors.js";
 import { classifyRoom, type RoomType } from "./room-classifier.js";
 
@@ -71,19 +73,22 @@ type FaceApi = {
     opts: unknown,
   ) => {
     withFaceLandmarks: (useTinyModel: boolean) => {
-      withAgeAndGender: () => Promise<
-        Array<{
-          age?: number;
-          gender?: string;
-          genderProbability?: number;
-          detection?: {
-            score?: number;
-            box?: { width: number; height: number };
-            imageWidth?: number;
-            imageHeight?: number;
-          };
-        }>
-      >;
+      withAgeAndGender: () => {
+        withFaceDescriptors: () => Promise<
+          Array<{
+            age?: number;
+            gender?: string;
+            genderProbability?: number;
+            descriptor?: Float32Array;
+            detection?: {
+              score?: number;
+              box?: { width: number; height: number };
+              imageWidth?: number;
+              imageHeight?: number;
+            };
+          }>
+        >;
+      };
     };
   };
 };
@@ -163,6 +168,8 @@ export type SelectionOutput = {
    * Empty arrays mean no images were confidently bucketed into that room type.
    */
   topRoomCandidates: TopRoomCandidatesMap;
+  /** v0.2+: full scan with scores for measurement handoff (solo person photos only). */
+  scanIndex: ScanIndexEntry[];
 };
 
 // ─── Room type → UserImageCategory mapping ────────────────────────────────────
@@ -572,6 +579,7 @@ export async function selectImages(
     detectionScore: number;
     genderProbability: number;
     faceAreaRatio: number;
+    faceDescriptor?: Float32Array;
   };
 
   const preCandidates: PreCandidate[] = [];
@@ -599,7 +607,11 @@ export async function selectImages(
         batch.map(async (file) => {
           try {
             const img = await fileToImage(file);
-            const faces = await faceapi.detectAllFaces(img, faceOpts).withFaceLandmarks(true).withAgeAndGender();
+            const faces = await faceapi
+              .detectAllFaces(img, faceOpts)
+              .withFaceLandmarks(true)
+              .withAgeAndGender()
+              .withFaceDescriptors();
             return { file, faces };
           } catch {
             return { file, faces: [] };
@@ -631,6 +643,7 @@ export async function selectImages(
           detectionScore: face.detection?.score ?? 0.5,
           genderProbability: face.genderProbability ?? 0,
           faceAreaRatio,
+          faceDescriptor: face.descriptor,
         });
       }
 
@@ -963,5 +976,6 @@ export async function selectImages(
   };
 
   onProgress?.({ phase: "complete", message: "Selection complete." });
-  return { assets: results, topCandidates, topRoomCandidates, rejections };
+  const scanIndex = buildScanIndexFromCandidates(candidates);
+  return { assets: results, topCandidates, topRoomCandidates, rejections, scanIndex };
 }

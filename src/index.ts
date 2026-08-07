@@ -32,7 +32,10 @@ export type {
   BatchProduct,
   BatchResult,
   TopRoomCandidate,
-  TopRoomCandidatesMap,
+  ScanIndexEntry,
+  ProfileMeasurementShortlists,
+  ProfileMeasurementPick,
+  MeasurementCluster,
 } from "./types.js";
 
 // Errors

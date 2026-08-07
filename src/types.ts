@@ -175,7 +175,51 @@ export type SelectionSummary = {
    * }
    */
   rejectionReasons: RejectionReason[];
+  /** v0.2+: number of photos in scanIndex after ingest (0 if furniture-only). */
+  scanIndexCount?: number;
 };
+
+// ─── Measurement handoff (v0.2+) ─────────────────────────────────────────────
+
+/** One scanned photo with scores from ingest — no second ML pass needed for picks. */
+export type ScanIndexEntry = {
+  photoId: string;
+  fileName: string;
+  hash: string;
+  blob: File;
+  gender: "male" | "female";
+  age: number;
+  genderProbability: number;
+  detectionScore: number;
+  faceAreaRatio: number;
+  frontScore: number;
+  frontLabel: string;
+  poseRank: number;
+  poseLabel: string;
+  faceDescriptor?: number[];
+  passesFullBody: boolean;
+  passesFaceCloseup: boolean;
+  scannedAt: string;
+};
+
+export type MeasurementCluster = {
+  id: number;
+  members: ScanIndexEntry[];
+  centroid: number[];
+};
+
+export type ProfileMeasurementPick = {
+  bodyPhotos: File[];
+  facePhotos: File[];
+  bodyTier: string;
+  faceTier: string;
+  clusterId: number | null;
+};
+
+/** Shortlists keyed by profileKey — female, male, kid_boy, kid_girl */
+export type ProfileMeasurementShortlists = Partial<
+  Record<"female" | "male" | "kid_boy" | "kid_girl", ProfileMeasurementPick>
+>;
 
 // ─── Eligibility ──────────────────────────────────────────────────────────────
 

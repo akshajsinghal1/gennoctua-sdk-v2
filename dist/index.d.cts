@@ -111,7 +111,43 @@ type SelectionSummary = {
      * }
      */
     rejectionReasons: RejectionReason[];
+    /** v0.2+: number of photos in scanIndex after ingest (0 if furniture-only). */
+    scanIndexCount?: number;
 };
+/** One scanned photo with scores from ingest — no second ML pass needed for picks. */
+type ScanIndexEntry = {
+    photoId: string;
+    fileName: string;
+    hash: string;
+    blob: File;
+    gender: "male" | "female";
+    age: number;
+    genderProbability: number;
+    detectionScore: number;
+    faceAreaRatio: number;
+    frontScore: number;
+    frontLabel: string;
+    poseRank: number;
+    poseLabel: string;
+    faceDescriptor?: number[];
+    passesFullBody: boolean;
+    passesFaceCloseup: boolean;
+    scannedAt: string;
+};
+type MeasurementCluster = {
+    id: number;
+    members: ScanIndexEntry[];
+    centroid: number[];
+};
+type ProfileMeasurementPick = {
+    bodyPhotos: File[];
+    facePhotos: File[];
+    bodyTier: string;
+    faceTier: string;
+    clusterId: number | null;
+};
+/** Shortlists keyed by profileKey — female, male, kid_boy, kid_girl */
+type ProfileMeasurementShortlists = Partial<Record<"female" | "male" | "kid_boy" | "kid_girl", ProfileMeasurementPick>>;
 type EligibilityResult = {
     eligible: true;
     productType: ProductType;
@@ -294,15 +330,6 @@ type TopRoomCandidate = {
     /** Highest-confidence detected object in the image (e.g. "bed", "couch") */
     topLabel: string;
 };
-/**
- * Top-5 room candidates per room type, ready to send to an LLM image picker.
- * Empty array means no images were bucketed into that room type.
- */
-type TopRoomCandidatesMap = {
-    bedroom: TopRoomCandidate[];
-    living_room: TopRoomCandidate[];
-    dining_room: TopRoomCandidate[];
-};
 type BatchProduct = {
     productId: string;
     imageUrl: string;
@@ -376,6 +403,22 @@ type SelectionProgress = {
     total?: number;
 };
 
+/**
+ * measurement.ts — v0.2
+ *
+ * Single-scan handoff: cluster + pick body/face shortlists from scanIndex
+ * (scores from ingest — no second ML pass).
+ *
+ * Front+side pairing for measure_fs is planned for a later SDK version.
+ */
+
+type MeasurementPickOptions = {
+    bodyLimit?: number;
+    faceLimit?: number;
+    /** Map profile asset hash → profileKey (female, male, kid_boy, kid_girl) */
+    profileHashes?: Record<string, string>;
+};
+
 declare class PersonalizeSDK {
     private config;
     private bus;
@@ -392,6 +435,8 @@ declare class PersonalizeSDK {
     private sessionId;
     private selectedAssets;
     private selectionSummary;
+    /** v0.2+: full ingest scan for measurement handoff */
+    private scanIndex;
     private currentProductContext;
     private viewMode;
     private activeAbortController;
@@ -437,6 +482,13 @@ declare class PersonalizeSDK {
     selection: {
         getSummary: () => SelectionSummary | null;
         getAssets: () => SelectedImageAsset[];
+    };
+    /** v0.2+: measurement handoff — cluster + body/face shortlists from scanIndex (no re-inference). */
+    measurement: {
+        getScanIndex: () => ScanIndexEntry[];
+        cluster: () => MeasurementCluster[];
+        getPhotoShortlists: (options?: MeasurementPickOptions) => ProfileMeasurementShortlists;
+        prepare: (options?: MeasurementPickOptions) => ProfileMeasurementShortlists;
     };
     product: {
         getContext: () => ProductContext | null;
@@ -543,4 +595,4 @@ declare function resetRoomClassifier(): void;
  */
 declare function classifyRoom(file: File, modelUrl?: string): Promise<RoomClassification>;
 
-export { type AnalyticsConfig, type AnalyticsEvent, type AuthConfig, type BatchProduct, type BatchResult, type CacheConfig, DEFAULT_ROOM_MODEL_URL, type DebugState, type EligibilityResult, type HpCategory, type PersonalizationMode, type PersonalizationResult, type PersonalizationState, Personalize, PersonalizeSDK, type ProductConfig, type ProductContext, type ProductImageContext, type ProductImageSource, type ProductRule, type ProductType, type RateLimitConfig, type RejectionReason, type RejectionReasonCode, type RoomClassification, type RoomType, type SDKConfig, SDKError, type SDKErrorCode, type SDKEventMap, type SDKEventName, type SelectedImageAsset, type SelectionProgress, type SelectionSummary, type TopRoomCandidate, type TopRoomCandidatesMap, type UserGender, type UserImageCategory, type ViewMode, classifyRoom, resetRoomClassifier };
+export { type AnalyticsConfig, type AnalyticsEvent, type AuthConfig, type BatchProduct, type BatchResult, type CacheConfig, DEFAULT_ROOM_MODEL_URL, type DebugState, type EligibilityResult, type HpCategory, type MeasurementCluster, type PersonalizationMode, type PersonalizationResult, type PersonalizationState, Personalize, PersonalizeSDK, type ProductConfig, type ProductContext, type ProductImageContext, type ProductImageSource, type ProductRule, type ProductType, type ProfileMeasurementPick, type ProfileMeasurementShortlists, type RateLimitConfig, type RejectionReason, type RejectionReasonCode, type RoomClassification, type RoomType, type SDKConfig, SDKError, type SDKErrorCode, type SDKEventMap, type SDKEventName, type ScanIndexEntry, type SelectedImageAsset, type SelectionProgress, type SelectionSummary, type TopRoomCandidate, type UserGender, type UserImageCategory, type ViewMode, classifyRoom, resetRoomClassifier };
