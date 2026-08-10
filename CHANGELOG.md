@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1] — 2026-08-10
+
+### Fixed
+- Load **`faceRecognitionNet`** before `.withFaceDescriptors()` during ingest — fixes `FaceRecognitionNet - load model before inference` on v0.2.0
+
+---
+
 ## [0.2.0] — 2026-08-07
 
 ### Added

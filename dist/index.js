@@ -110,7 +110,7 @@ var AuthService = class {
     const token = await this.resolveToken();
     return {
       "Authorization": `Bearer ${token}`,
-      "X-SDK-Version": "0.2.0"
+      "X-SDK-Version": "0.2.1"
     };
   }
   getProxyUrl() {
@@ -1526,6 +1526,7 @@ function ensureFaceApiReady() {
       await Promise.all([
         faceapi.nets.tinyFaceDetector.loadFromUri(FACE_MODELS_CDN),
         faceapi.nets.faceLandmark68TinyNet.loadFromUri(FACE_MODELS_CDN),
+        faceapi.nets.faceRecognitionNet.loadFromUri(FACE_MODELS_CDN),
         faceapi.nets.ageGenderNet.loadFromUri(FACE_MODELS_CDN)
       ]);
       return faceapi;

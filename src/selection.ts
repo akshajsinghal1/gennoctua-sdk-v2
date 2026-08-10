@@ -65,6 +65,7 @@ type FaceApi = {
   nets: {
     tinyFaceDetector: { loadFromUri: (uri: string) => Promise<unknown> };
     faceLandmark68TinyNet: { loadFromUri: (uri: string) => Promise<unknown> };
+    faceRecognitionNet: { loadFromUri: (uri: string) => Promise<unknown> };
     ageGenderNet: { loadFromUri: (uri: string) => Promise<unknown> };
   };
   TinyFaceDetectorOptions: new (opts: { inputSize: number; scoreThreshold: number }) => unknown;
@@ -221,6 +222,7 @@ export function ensureFaceApiReady(): Promise<FaceApi> {
       await Promise.all([
         faceapi.nets.tinyFaceDetector.loadFromUri(FACE_MODELS_CDN),
         faceapi.nets.faceLandmark68TinyNet.loadFromUri(FACE_MODELS_CDN),
+        faceapi.nets.faceRecognitionNet.loadFromUri(FACE_MODELS_CDN),
         faceapi.nets.ageGenderNet.loadFromUri(FACE_MODELS_CDN),
       ]);
       return faceapi;
