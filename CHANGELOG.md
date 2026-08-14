@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.1] — 2026-08-14
+
+### Fixed
+- **Side detection** — detect a profile by edge-on shoulder ratio (shoulder-width / torso-height &lt; 0.45), not the front-facing label. A real side scores in the "angled" band, so the label missed it and `sideRank` never fired.
+
+---
+
+## [0.3.0] — 2026-08-14
+
+### Added
+- **SDK-side front + side pairing:** `sdk.measurement.getBodyPair(gender)` and exported `selectBodyPair(scanIndex, gender)` → best front + side for the `measure_fs` sizing method (no `/api/select` round-trip, no second ML pass)
+- Per-photo **`armsAway`** (arm abduction ≥ 5°) and **`sideRank`** (side + full-body standing) on every `scanIndex` entry
+- `BodyPairResult` type: `{ front, side, frontOk, sideOk, reasons, candidates, action }`
+
+### Unchanged
+- Profile selection, VTO, v0.2 measurement shortlists — same API surface
+
+---
+
 ## [0.2.1] — 2026-08-10
 
 ### Fixed
