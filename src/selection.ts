@@ -58,6 +58,8 @@ const POSE_MIN_KNEE_Y = 0.70;
 const POSE_MIN_ANKLE_Y = 0.82;
 /** Minimum normalized shoulder width to detect front-facing */
 const POSE_MIN_SHOULDER_WIDTH = 0.12;
+/** Minimum upper-arm abduction (deg) from the torso for "arms slightly away" (body sizing) */
+const ARM_ABD_MIN = 5;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -109,6 +111,10 @@ type PoseAssessment = {
    *  3 = upper_body_standing, 4 = full_body_sitting, 5 = knee_visible_sitting */
   poseRank: number;
   poseLabel: string;
+  /** both upper arms held slightly away from the torso (needed for body sizing) */
+  armsAway: boolean;
+  /** side-view quality: 1 = side-facing + full-body standing (a usable SIDE), else 0 */
+  sideRank: number;
 };
 
 type Candidate = {
@@ -328,6 +334,23 @@ function ptLower(kp: Keypoint[], index: number): { x: number; y: number } | null
   return p;
 }
 
+/** Both upper arms at least ARM_ABD_MIN deg from the torso-down direction.
+ *  Uses shoulders(11,12), elbows(13,14), hips(23,24). Build-agnostic (angle, not gap). */
+function computeArmsAway(kp: Keypoint[]): boolean {
+  const ls = pt(kp, 11), rs = pt(kp, 12), le = pt(kp, 13), re = pt(kp, 14), lh = pt(kp, 23), rh = pt(kp, 24);
+  if (!ls || !rs || !lh || !rh) return false;
+  const shMidX = (ls.x + rs.x) / 2, shMidY = (ls.y + rs.y) / 2;
+  const dx = (lh.x + rh.x) / 2 - shMidX, dy = (lh.y + rh.y) / 2 - shMidY;
+  const abd = (sh: { x: number; y: number }, el: { x: number; y: number } | null): number => {
+    if (!el) return 0;
+    const ux = el.x - sh.x, uy = el.y - sh.y;
+    const dot = ux * dx + uy * dy;
+    const mag = Math.hypot(ux, uy) * Math.hypot(dx, dy) + 1e-9;
+    return (Math.acos(Math.max(-1, Math.min(1, dot / mag))) * 180) / Math.PI;
+  };
+  return Math.min(abd(ls, le), abd(rs, re)) >= ARM_ABD_MIN;
+}
+
 // ─── Front-Facing Detection ───────────────────────────────────────────────────
 
 /**
@@ -442,32 +465,21 @@ function computeFrontFacingDiagnostic(
  */
 function rankPoseCandidate(kp: Keypoint[]): PoseAssessment {
   const { score: frontScore, label: frontLabel } = computeFrontFacingDiagnostic(kp);
-
-  // Must be front-facing to qualify for full-body
-  if (frontScore < POSE_FRONT_FACING_MIN_SCORE) {
-    return { frontScore, frontLabel, poseRank: 0, poseLabel: "not_front_facing" };
-  }
+  const armsAway = computeArmsAway(kp);
 
   const ls = pt(kp, 11); const rs = pt(kp, 12); // shoulders
   const lh = pt(kp, 23); const rh = pt(kp, 24); // hips
 
   if (!ls || !rs || !lh || !rh) {
-    return { frontScore, frontLabel, poseRank: 0, poseLabel: "insufficient_keypoints" };
-  }
-
-  // Check shoulder width minimum
-  if (Math.abs(ls.x - rs.x) < POSE_MIN_SHOULDER_WIDTH) {
-    return { frontScore, frontLabel, poseRank: 0, poseLabel: "shoulder_too_narrow" };
+    return { frontScore, frontLabel, poseRank: 0, poseLabel: "insufficient_keypoints", armsAway, sideRank: 0 };
   }
 
   // Lower body keypoints (stricter visibility threshold)
   const lk = ptLower(kp, 25); const rk = ptLower(kp, 26); // knees
   const la = ptLower(kp, 27); const ra = ptLower(kp, 28); // ankles
-
   const hasKnees = !!(lk && rk);
   const hasAnkles = !!(la && ra);
 
-  // Determine bottom-most point for body height calculation
   const bodyTop = Math.min(ls.y, rs.y);
   const bodyBottom = hasAnkles
     ? Math.max(la!.y, ra!.y)
@@ -476,27 +488,35 @@ function rankPoseCandidate(kp: Keypoint[]): PoseAssessment {
     : Math.max(lh.y, rh.y);
   const bodyHeight = bodyBottom - bodyTop;
 
-  // Standing = correct y-ordering + sufficient body height
-  // Deliberately NO absolute y-position thresholds — a person standing with
-  // breathing room below their feet is still standing, not sitting.
+  // Standing = correct y-ordering + sufficient body height. View-agnostic, so it
+  // also qualifies a SIDE photo (a good side is side-facing + full-body standing).
   const isStanding =
     bodyHeight >= POSE_MIN_BODY_HEIGHT &&
     ls.y < lh.y && rs.y < rh.y &&                     // shoulders above hips
     (!hasKnees || (lh.y < lk!.y && rh.y < rk!.y));    // hips above knees
+  const fullBodyStanding = hasAnkles && isStanding;
+  const sideRank = (frontLabel === "side_facing" && fullBodyStanding) ? 1 : 0;
 
-  if (hasAnkles && isStanding) return { frontScore, frontLabel, poseRank: 1, poseLabel: "full_body_standing" };
-  if (hasKnees && isStanding)  return { frontScore, frontLabel, poseRank: 2, poseLabel: "knee_visible_standing" };
-  if (!hasKnees && !hasAnkles) return { frontScore, frontLabel, poseRank: 3, poseLabel: "upper_body_standing" };
-  if (hasAnkles)               return { frontScore, frontLabel, poseRank: 4, poseLabel: "full_body_sitting" };
-  if (hasKnees)                return { frontScore, frontLabel, poseRank: 5, poseLabel: "knee_visible_sitting" };
+  // Front-facing rank (requires front-facing + adequate shoulder width) — unchanged.
+  if (frontScore < POSE_FRONT_FACING_MIN_SCORE) {
+    return { frontScore, frontLabel, poseRank: 0, poseLabel: "not_front_facing", armsAway, sideRank };
+  }
+  if (Math.abs(ls.x - rs.x) < POSE_MIN_SHOULDER_WIDTH) {
+    return { frontScore, frontLabel, poseRank: 0, poseLabel: "shoulder_too_narrow", armsAway, sideRank };
+  }
+  if (hasAnkles && isStanding) return { frontScore, frontLabel, poseRank: 1, poseLabel: "full_body_standing", armsAway, sideRank };
+  if (hasKnees && isStanding)  return { frontScore, frontLabel, poseRank: 2, poseLabel: "knee_visible_standing", armsAway, sideRank };
+  if (!hasKnees && !hasAnkles) return { frontScore, frontLabel, poseRank: 3, poseLabel: "upper_body_standing", armsAway, sideRank };
+  if (hasAnkles)               return { frontScore, frontLabel, poseRank: 4, poseLabel: "full_body_sitting", armsAway, sideRank };
+  if (hasKnees)                return { frontScore, frontLabel, poseRank: 5, poseLabel: "knee_visible_sitting", armsAway, sideRank };
 
-  return { frontScore, frontLabel, poseRank: 3, poseLabel: "upper_body" };
+  return { frontScore, frontLabel, poseRank: 3, poseLabel: "upper_body", armsAway, sideRank };
 }
 
 // ─── Pose Assessment ──────────────────────────────────────────────────────────
 
 async function getPoseAssessment(file: File, detector: PoseDetector): Promise<PoseAssessment> {
-  const fallback: PoseAssessment = { frontScore: 0, frontLabel: "side_facing", poseRank: 0, poseLabel: "not_detected" };
+  const fallback: PoseAssessment = { frontScore: 0, frontLabel: "side_facing", poseRank: 0, poseLabel: "not_detected", armsAway: false, sideRank: 0 };
   try {
     const img = await fileToImage(file);
     const canvas = document.createElement("canvas");
@@ -515,7 +535,7 @@ async function getPoseAssessment(file: File, detector: PoseDetector): Promise<Po
 
     // Reject multi-person frames — distinct label so rejections can be counted separately
     if (result.landmarks.length > 1) {
-      return { frontScore: 0, frontLabel: "side_facing", poseRank: 0, poseLabel: "multiple_poses" };
+      return { frontScore: 0, frontLabel: "side_facing", poseRank: 0, poseLabel: "multiple_poses", armsAway: false, sideRank: 0 };
     }
 
     return rankPoseCandidate(result.landmarks[0]);

@@ -129,10 +129,42 @@ type ScanIndexEntry = {
     frontLabel: string;
     poseRank: number;
     poseLabel: string;
+    /** both upper arms held slightly away from the torso (body-sizing front requirement) */
+    armsAway: boolean;
+    /** side-view quality: 1 = side-facing + full-body standing (a usable SIDE), else 0 */
+    sideRank: number;
     faceDescriptor?: number[];
     passesFullBody: boolean;
     passesFaceCloseup: boolean;
     scannedAt: string;
+};
+/** Result of picking a front+side pair for body sizing from the scan index. */
+type BodyPairResult = {
+    front: File | null;
+    side: File | null;
+    frontOk: boolean;
+    sideOk: boolean;
+    /** why the front/side isn't ideal (empty when ok) — for user-facing guidance */
+    reasons: {
+        front: string[];
+        side: string[];
+    };
+    /** all candidates of each view, best-first, for an override picker */
+    candidates: {
+        front: Array<{
+            file: File;
+            frontScore: number;
+            poseRank: number;
+            armsAway: boolean;
+        }>;
+        side: Array<{
+            file: File;
+            sideRank: number;
+            frontScore: number;
+        }>;
+    };
+    /** measure | ask_front | ask_side | ask_both */
+    action: "measure" | "ask_front" | "ask_side" | "ask_both";
 };
 type MeasurementCluster = {
     id: number;
@@ -418,6 +450,15 @@ type MeasurementPickOptions = {
     /** Map profile asset hash → profileKey (female, male, kid_boy, kid_girl) */
     profileHashes?: Record<string, string>;
 };
+/**
+ * Pick the best FRONT + SIDE pair for body sizing from the scan index, reusing the
+ * pose/face signals already computed during selection (no re-inference).
+ *   FRONT = front-facing + full-body standing + arms slightly away
+ *   SIDE  = side-facing + full-body standing
+ * Returns the chosen files, pass/ask verdicts, per-view candidates (for override),
+ * and an action. Replaces the server-side /select round-trip.
+ */
+declare function selectBodyPair(scanIndex: ScanIndexEntry[], gender: "male" | "female"): BodyPairResult;
 
 declare class PersonalizeSDK {
     private config;
@@ -487,6 +528,9 @@ declare class PersonalizeSDK {
     measurement: {
         getScanIndex: () => ScanIndexEntry[];
         cluster: () => MeasurementCluster[];
+        /** Best front+side pair for body sizing from the scan index (no re-inference).
+         *  Replaces the server-side /select round-trip. */
+        getBodyPair: (gender: "male" | "female") => BodyPairResult;
         getPhotoShortlists: (options?: MeasurementPickOptions) => ProfileMeasurementShortlists;
         prepare: (options?: MeasurementPickOptions) => ProfileMeasurementShortlists;
     };
@@ -595,4 +639,4 @@ declare function resetRoomClassifier(): void;
  */
 declare function classifyRoom(file: File, modelUrl?: string): Promise<RoomClassification>;
 
-export { type AnalyticsConfig, type AnalyticsEvent, type AuthConfig, type BatchProduct, type BatchResult, type CacheConfig, DEFAULT_ROOM_MODEL_URL, type DebugState, type EligibilityResult, type HpCategory, type MeasurementCluster, type PersonalizationMode, type PersonalizationResult, type PersonalizationState, Personalize, PersonalizeSDK, type ProductConfig, type ProductContext, type ProductImageContext, type ProductImageSource, type ProductRule, type ProductType, type ProfileMeasurementPick, type ProfileMeasurementShortlists, type RateLimitConfig, type RejectionReason, type RejectionReasonCode, type RoomClassification, type RoomType, type SDKConfig, SDKError, type SDKErrorCode, type SDKEventMap, type SDKEventName, type ScanIndexEntry, type SelectedImageAsset, type SelectionProgress, type SelectionSummary, type TopRoomCandidate, type UserGender, type UserImageCategory, type ViewMode, classifyRoom, resetRoomClassifier };
+export { type AnalyticsConfig, type AnalyticsEvent, type AuthConfig, type BatchProduct, type BatchResult, type BodyPairResult, type CacheConfig, DEFAULT_ROOM_MODEL_URL, type DebugState, type EligibilityResult, type HpCategory, type MeasurementCluster, type PersonalizationMode, type PersonalizationResult, type PersonalizationState, Personalize, PersonalizeSDK, type ProductConfig, type ProductContext, type ProductImageContext, type ProductImageSource, type ProductRule, type ProductType, type ProfileMeasurementPick, type ProfileMeasurementShortlists, type RateLimitConfig, type RejectionReason, type RejectionReasonCode, type RoomClassification, type RoomType, type SDKConfig, SDKError, type SDKErrorCode, type SDKEventMap, type SDKEventName, type ScanIndexEntry, type SelectedImageAsset, type SelectionProgress, type SelectionSummary, type TopRoomCandidate, type UserGender, type UserImageCategory, type ViewMode, classifyRoom, resetRoomClassifier, selectBodyPair };

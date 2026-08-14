@@ -14,7 +14,8 @@ import type { TopRoomCandidatesMap } from "./types.js";
 import { FallbackTaggingService } from "./tagging.js";
 import { checkEligibility, resolveCategoryFromGender } from "./mapping.js";
 import { normalizeError, rateLimitedError } from "./errors.js";
-import { clusterScanIndex, pickMeasurementShortlists, type MeasurementPickOptions } from "./measurement.js";
+import { clusterScanIndex, pickMeasurementShortlists, selectBodyPair, type MeasurementPickOptions } from "./measurement.js";
+import type { BodyPairResult } from "./types.js";
 import type {
   SDKConfig,
   SDKEventName,
@@ -544,6 +545,10 @@ export class PersonalizeSDK {
   measurement = {
     getScanIndex: (): ScanIndexEntry[] => [...this.scanIndex],
     cluster: (): MeasurementCluster[] => clusterScanIndex(this.scanIndex),
+    /** Best front+side pair for body sizing from the scan index (no re-inference).
+     *  Replaces the server-side /select round-trip. */
+    getBodyPair: (gender: "male" | "female"): BodyPairResult =>
+      selectBodyPair(this.scanIndex, gender),
     getPhotoShortlists: (options?: MeasurementPickOptions): ProfileMeasurementShortlists => {
       const profileHashes: Record<string, string> = { ...(options?.profileHashes ?? {}) };
       if (!Object.keys(profileHashes).length) {

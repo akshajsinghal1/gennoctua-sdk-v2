@@ -44,6 +44,8 @@ export type { SDKErrorCode } from "./errors.js";
 
 // Selection progress (useful for progress UI)
 export type { SelectionProgress } from "./selection.js";
+export { selectBodyPair } from "./measurement.js";
+export type { BodyPairResult } from "./types.js";
 
 // Room classifier — exposed for advanced use (e.g. show room type detection in UI)
 export type { RoomType, RoomClassification } from "./room-classifier.js";

@@ -196,10 +196,31 @@ export type ScanIndexEntry = {
   frontLabel: string;
   poseRank: number;
   poseLabel: string;
+  /** both upper arms held slightly away from the torso (body-sizing front requirement) */
+  armsAway: boolean;
+  /** side-view quality: 1 = side-facing + full-body standing (a usable SIDE), else 0 */
+  sideRank: number;
   faceDescriptor?: number[];
   passesFullBody: boolean;
   passesFaceCloseup: boolean;
   scannedAt: string;
+};
+
+/** Result of picking a front+side pair for body sizing from the scan index. */
+export type BodyPairResult = {
+  front: File | null;
+  side: File | null;
+  frontOk: boolean;
+  sideOk: boolean;
+  /** why the front/side isn't ideal (empty when ok) — for user-facing guidance */
+  reasons: { front: string[]; side: string[] };
+  /** all candidates of each view, best-first, for an override picker */
+  candidates: {
+    front: Array<{ file: File; frontScore: number; poseRank: number; armsAway: boolean }>;
+    side: Array<{ file: File; sideRank: number; frontScore: number }>;
+  };
+  /** measure | ask_front | ask_side | ask_both */
+  action: "measure" | "ask_front" | "ask_side" | "ask_both";
 };
 
 export type MeasurementCluster = {

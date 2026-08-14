@@ -7,7 +7,7 @@
  * Front+side pairing for measure_fs is planned for a later SDK version.
  */
 
-import type { ScanIndexEntry, MeasurementCluster, ProfileMeasurementShortlists } from "./types.js";
+import type { ScanIndexEntry, MeasurementCluster, ProfileMeasurementShortlists, BodyPairResult } from "./types.js";
 
 const FACE_CLUSTER_THRESHOLD = 0.55;
 const BODY_SIZING_FRONT_MIN = 80;
@@ -266,6 +266,59 @@ export function pickMeasurementShortlists(
   return out;
 }
 
+/**
+ * Pick the best FRONT + SIDE pair for body sizing from the scan index, reusing the
+ * pose/face signals already computed during selection (no re-inference).
+ *   FRONT = front-facing + full-body standing + arms slightly away
+ *   SIDE  = side-facing + full-body standing
+ * Returns the chosen files, pass/ask verdicts, per-view candidates (for override),
+ * and an action. Replaces the server-side /select round-trip.
+ */
+export function selectBodyPair(
+  scanIndex: ScanIndexEntry[],
+  gender: "male" | "female",
+): BodyPairResult {
+  const pool = scanIndex.filter((e) => e.gender === gender);
+
+  // FRONT: front-facing full-body standing (poseRank 1-2). Prefer arms-away, but keep
+  // arms-down ones as candidates so the UI can show one + a "arms away" warning.
+  const frontStanding = pool.filter((e) => e.poseRank >= 1 && e.poseRank <= 2);
+  const sortFront = (rows: ScanIndexEntry[]) =>
+    [...rows].sort((a, b) => a.poseRank - b.poseRank || b.frontScore - a.frontScore);
+  const frontArms = sortFront(frontStanding.filter((e) => e.armsAway));
+  const frontAny = sortFront(frontStanding);
+  const frontCands = frontArms.length ? frontArms.concat(frontAny.filter((e) => !e.armsAway)) : frontAny;
+  const bestFront = frontCands[0] ?? null;
+
+  // SIDE: side-facing + full-body standing (sideRank 1). Lower frontScore = more sideways.
+  const sideCands = pool.filter((e) => e.sideRank >= 1).sort((a, b) => a.frontScore - b.frontScore);
+  const bestSide = sideCands[0] ?? null;
+
+  const frontReasons: string[] = [];
+  if (!bestFront) frontReasons.push("Stand facing the camera, full body in frame.");
+  else if (!bestFront.armsAway) frontReasons.push("Hold your arms slightly away from your body.");
+  const sideReasons: string[] = [];
+  if (!bestSide) sideReasons.push("Turn fully sideways, full body in frame.");
+
+  const frontOk = !!(bestFront && bestFront.armsAway);
+  const sideOk = !!bestSide;
+  const action: BodyPairResult["action"] =
+    frontOk && sideOk ? "measure" : !frontOk && !sideOk ? "ask_both" : !frontOk ? "ask_front" : "ask_side";
+
+  return {
+    front: bestFront?.blob ?? null,
+    side: bestSide?.blob ?? null,
+    frontOk,
+    sideOk,
+    reasons: { front: frontReasons, side: sideReasons },
+    candidates: {
+      front: frontCands.map((e) => ({ file: e.blob, frontScore: e.frontScore, poseRank: e.poseRank, armsAway: e.armsAway })),
+      side: sideCands.map((e) => ({ file: e.blob, sideRank: e.sideRank, frontScore: e.frontScore })),
+    },
+    action,
+  };
+}
+
 export function buildScanIndexFromCandidates(
   candidates: Array<{
     file: File;
@@ -278,6 +331,8 @@ export function buildScanIndexFromCandidates(
     frontLabel: string;
     poseRank: number;
     poseLabel: string;
+    armsAway?: boolean;
+    sideRank?: number;
     faceDescriptor?: Float32Array | number[];
   }>,
 ): ScanIndexEntry[] {
@@ -298,6 +353,8 @@ export function buildScanIndexFromCandidates(
       frontLabel: c.frontLabel,
       poseRank: c.poseRank,
       poseLabel: c.poseLabel,
+      armsAway: c.armsAway ?? false,
+      sideRank: c.sideRank ?? 0,
       faceDescriptor: c.faceDescriptor
         ? Array.from(c.faceDescriptor)
         : undefined,

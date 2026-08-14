@@ -1461,6 +1461,37 @@ function pickMeasurementShortlists(scanIndex, options = {}) {
   }
   return out;
 }
+function selectBodyPair(scanIndex, gender) {
+  const pool = scanIndex.filter((e) => e.gender === gender);
+  const frontStanding = pool.filter((e) => e.poseRank >= 1 && e.poseRank <= 2);
+  const sortFront = (rows) => [...rows].sort((a, b) => a.poseRank - b.poseRank || b.frontScore - a.frontScore);
+  const frontArms = sortFront(frontStanding.filter((e) => e.armsAway));
+  const frontAny = sortFront(frontStanding);
+  const frontCands = frontArms.length ? frontArms.concat(frontAny.filter((e) => !e.armsAway)) : frontAny;
+  const bestFront = frontCands[0] ?? null;
+  const sideCands = pool.filter((e) => e.sideRank >= 1).sort((a, b) => a.frontScore - b.frontScore);
+  const bestSide = sideCands[0] ?? null;
+  const frontReasons = [];
+  if (!bestFront) frontReasons.push("Stand facing the camera, full body in frame.");
+  else if (!bestFront.armsAway) frontReasons.push("Hold your arms slightly away from your body.");
+  const sideReasons = [];
+  if (!bestSide) sideReasons.push("Turn fully sideways, full body in frame.");
+  const frontOk = !!(bestFront && bestFront.armsAway);
+  const sideOk = !!bestSide;
+  const action = frontOk && sideOk ? "measure" : !frontOk && !sideOk ? "ask_both" : !frontOk ? "ask_front" : "ask_side";
+  return {
+    front: bestFront?.blob ?? null,
+    side: bestSide?.blob ?? null,
+    frontOk,
+    sideOk,
+    reasons: { front: frontReasons, side: sideReasons },
+    candidates: {
+      front: frontCands.map((e) => ({ file: e.blob, frontScore: e.frontScore, poseRank: e.poseRank, armsAway: e.armsAway })),
+      side: sideCands.map((e) => ({ file: e.blob, sideRank: e.sideRank, frontScore: e.frontScore }))
+    },
+    action
+  };
+}
 function buildScanIndexFromCandidates(candidates) {
   const now = (/* @__PURE__ */ new Date()).toISOString();
   return candidates.map((c, i) => {
@@ -1479,6 +1510,8 @@ function buildScanIndexFromCandidates(candidates) {
       frontLabel: c.frontLabel,
       poseRank: c.poseRank,
       poseLabel: c.poseLabel,
+      armsAway: c.armsAway ?? false,
+      sideRank: c.sideRank ?? 0,
       faceDescriptor: c.faceDescriptor ? Array.from(c.faceDescriptor) : void 0,
       passesFullBody: c.frontScore >= BODY_SIZING_FRONT_MIN && c.poseRank > 0 && c.poseRank <= 2,
       passesFaceCloseup: c.frontScore >= BODY_SIZING_FRONT_MIN,
@@ -1773,6 +1806,7 @@ var POSE_HIP_LEVEL_MAX = 0.08;
 var POSE_CENTER_OFFSET_MAX = 0.16;
 var POSE_MIN_BODY_HEIGHT = 0.46;
 var POSE_MIN_SHOULDER_WIDTH = 0.12;
+var ARM_ABD_MIN = 5;
 var ROOM_TYPE_TO_CATEGORY = {
   bedroom: "room_bedroom",
   living_room: "room_living_room",
@@ -1895,6 +1929,20 @@ function ptLower(kp, index) {
   if (!p || typeof p.visibility === "number" && p.visibility < KP_LOWER_MIN_CONF) return null;
   return p;
 }
+function computeArmsAway(kp) {
+  const ls = pt(kp, 11), rs = pt(kp, 12), le = pt(kp, 13), re = pt(kp, 14), lh = pt(kp, 23), rh = pt(kp, 24);
+  if (!ls || !rs || !lh || !rh) return false;
+  const shMidX = (ls.x + rs.x) / 2, shMidY = (ls.y + rs.y) / 2;
+  const dx = (lh.x + rh.x) / 2 - shMidX, dy = (lh.y + rh.y) / 2 - shMidY;
+  const abd = (sh, el) => {
+    if (!el) return 0;
+    const ux = el.x - sh.x, uy = el.y - sh.y;
+    const dot = ux * dx + uy * dy;
+    const mag = Math.hypot(ux, uy) * Math.hypot(dx, dy) + 1e-9;
+    return Math.acos(Math.max(-1, Math.min(1, dot / mag))) * 180 / Math.PI;
+  };
+  return Math.min(abd(ls, le), abd(rs, re)) >= ARM_ABD_MIN;
+}
 function computeFrontFacingDiagnostic(kp) {
   const nose = pt(kp, 0);
   const leftEar = pt(kp, 7);
@@ -1948,18 +1996,13 @@ function computeFrontFacingDiagnostic(kp) {
 }
 function rankPoseCandidate(kp) {
   const { score: frontScore, label: frontLabel } = computeFrontFacingDiagnostic(kp);
-  if (frontScore < POSE_FRONT_FACING_MIN_SCORE) {
-    return { frontScore, frontLabel, poseRank: 0, poseLabel: "not_front_facing" };
-  }
+  const armsAway = computeArmsAway(kp);
   const ls = pt(kp, 11);
   const rs = pt(kp, 12);
   const lh = pt(kp, 23);
   const rh = pt(kp, 24);
   if (!ls || !rs || !lh || !rh) {
-    return { frontScore, frontLabel, poseRank: 0, poseLabel: "insufficient_keypoints" };
-  }
-  if (Math.abs(ls.x - rs.x) < POSE_MIN_SHOULDER_WIDTH) {
-    return { frontScore, frontLabel, poseRank: 0, poseLabel: "shoulder_too_narrow" };
+    return { frontScore, frontLabel, poseRank: 0, poseLabel: "insufficient_keypoints", armsAway, sideRank: 0 };
   }
   const lk = ptLower(kp, 25);
   const rk = ptLower(kp, 26);
@@ -1972,15 +2015,23 @@ function rankPoseCandidate(kp) {
   const bodyHeight = bodyBottom - bodyTop;
   const isStanding = bodyHeight >= POSE_MIN_BODY_HEIGHT && ls.y < lh.y && rs.y < rh.y && // shoulders above hips
   (!hasKnees || lh.y < lk.y && rh.y < rk.y);
-  if (hasAnkles && isStanding) return { frontScore, frontLabel, poseRank: 1, poseLabel: "full_body_standing" };
-  if (hasKnees && isStanding) return { frontScore, frontLabel, poseRank: 2, poseLabel: "knee_visible_standing" };
-  if (!hasKnees && !hasAnkles) return { frontScore, frontLabel, poseRank: 3, poseLabel: "upper_body_standing" };
-  if (hasAnkles) return { frontScore, frontLabel, poseRank: 4, poseLabel: "full_body_sitting" };
-  if (hasKnees) return { frontScore, frontLabel, poseRank: 5, poseLabel: "knee_visible_sitting" };
-  return { frontScore, frontLabel, poseRank: 3, poseLabel: "upper_body" };
+  const fullBodyStanding = hasAnkles && isStanding;
+  const sideRank = frontLabel === "side_facing" && fullBodyStanding ? 1 : 0;
+  if (frontScore < POSE_FRONT_FACING_MIN_SCORE) {
+    return { frontScore, frontLabel, poseRank: 0, poseLabel: "not_front_facing", armsAway, sideRank };
+  }
+  if (Math.abs(ls.x - rs.x) < POSE_MIN_SHOULDER_WIDTH) {
+    return { frontScore, frontLabel, poseRank: 0, poseLabel: "shoulder_too_narrow", armsAway, sideRank };
+  }
+  if (hasAnkles && isStanding) return { frontScore, frontLabel, poseRank: 1, poseLabel: "full_body_standing", armsAway, sideRank };
+  if (hasKnees && isStanding) return { frontScore, frontLabel, poseRank: 2, poseLabel: "knee_visible_standing", armsAway, sideRank };
+  if (!hasKnees && !hasAnkles) return { frontScore, frontLabel, poseRank: 3, poseLabel: "upper_body_standing", armsAway, sideRank };
+  if (hasAnkles) return { frontScore, frontLabel, poseRank: 4, poseLabel: "full_body_sitting", armsAway, sideRank };
+  if (hasKnees) return { frontScore, frontLabel, poseRank: 5, poseLabel: "knee_visible_sitting", armsAway, sideRank };
+  return { frontScore, frontLabel, poseRank: 3, poseLabel: "upper_body", armsAway, sideRank };
 }
 async function getPoseAssessment(file, detector) {
-  const fallback = { frontScore: 0, frontLabel: "side_facing", poseRank: 0, poseLabel: "not_detected" };
+  const fallback = { frontScore: 0, frontLabel: "side_facing", poseRank: 0, poseLabel: "not_detected", armsAway: false, sideRank: 0 };
   try {
     const img = await fileToImage(file);
     const canvas = document.createElement("canvas");
@@ -1994,7 +2045,7 @@ async function getPoseAssessment(file, detector) {
     const result = detector.detect(canvas);
     if (!result?.landmarks?.length) return fallback;
     if (result.landmarks.length > 1) {
-      return { frontScore: 0, frontLabel: "side_facing", poseRank: 0, poseLabel: "multiple_poses" };
+      return { frontScore: 0, frontLabel: "side_facing", poseRank: 0, poseLabel: "multiple_poses", armsAway: false, sideRank: 0 };
     }
     return rankPoseCandidate(result.landmarks[0]);
   } catch {
@@ -2525,6 +2576,9 @@ var PersonalizeSDK = class _PersonalizeSDK {
     this.measurement = {
       getScanIndex: () => [...this.scanIndex],
       cluster: () => clusterScanIndex(this.scanIndex),
+      /** Best front+side pair for body sizing from the scan index (no re-inference).
+       *  Replaces the server-side /select round-trip. */
+      getBodyPair: (gender) => selectBodyPair(this.scanIndex, gender),
       getPhotoShortlists: (options) => {
         const profileHashes = { ...options?.profileHashes ?? {} };
         if (!Object.keys(profileHashes).length) {
@@ -3169,5 +3223,6 @@ exports.Personalize = Personalize;
 exports.PersonalizeSDK = PersonalizeSDK;
 exports.classifyRoom = classifyRoom;
 exports.resetRoomClassifier = resetRoomClassifier;
+exports.selectBodyPair = selectBodyPair;
 //# sourceMappingURL=index.cjs.map
 //# sourceMappingURL=index.cjs.map
