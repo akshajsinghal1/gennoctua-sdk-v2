@@ -110,7 +110,7 @@ var AuthService = class {
     const token = await this.resolveToken();
     return {
       "Authorization": `Bearer ${token}`,
-      "X-SDK-Version": "0.2.1"
+      "X-SDK-Version": "0.3.0"
     };
   }
   getProxyUrl() {
@@ -1520,6 +1520,7 @@ var POSE_CENTER_OFFSET_MAX = 0.16;
 var POSE_MIN_BODY_HEIGHT = 0.46;
 var POSE_MIN_SHOULDER_WIDTH = 0.12;
 var ARM_ABD_MIN = 5;
+var SIDE_RATIO_MAX = 0.45;
 var ROOM_TYPE_TO_CATEGORY = {
   bedroom: "room_bedroom",
   living_room: "room_living_room",
@@ -1729,7 +1730,10 @@ function rankPoseCandidate(kp) {
   const isStanding = bodyHeight >= POSE_MIN_BODY_HEIGHT && ls.y < lh.y && rs.y < rh.y && // shoulders above hips
   (!hasKnees || lh.y < lk.y && rh.y < rk.y);
   const fullBodyStanding = hasAnkles && isStanding;
-  const sideRank = frontLabel === "side_facing" && fullBodyStanding ? 1 : 0;
+  const shoulderW = Math.abs(ls.x - rs.x);
+  const torsoH = Math.abs((lh.y + rh.y) / 2 - (ls.y + rs.y) / 2);
+  const shoulderRatio = torsoH > 0 ? shoulderW / torsoH : 1;
+  const sideRank = fullBodyStanding && shoulderRatio < SIDE_RATIO_MAX ? 1 : 0;
   if (frontScore < POSE_FRONT_FACING_MIN_SCORE) {
     return { frontScore, frontLabel, poseRank: 0, poseLabel: "not_front_facing", armsAway, sideRank };
   }

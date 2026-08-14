@@ -60,6 +60,10 @@ const POSE_MIN_ANKLE_Y = 0.82;
 const POSE_MIN_SHOULDER_WIDTH = 0.12;
 /** Minimum upper-arm abduction (deg) from the torso for "arms slightly away" (body sizing) */
 const ARM_ABD_MIN = 5;
+/** Max shoulder-width / torso-height ratio for a true side/profile (edge-on shoulders).
+ *  Front ~0.55-0.9, side ~0.0-0.16 — a real profile lands in the front-score "angled"
+ *  band, so the shoulder-narrowness (not frontLabel) is the reliable side signal. */
+const SIDE_RATIO_MAX = 0.45;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -495,7 +499,13 @@ function rankPoseCandidate(kp: Keypoint[]): PoseAssessment {
     ls.y < lh.y && rs.y < rh.y &&                     // shoulders above hips
     (!hasKnees || (lh.y < lk!.y && rh.y < rk!.y));    // hips above knees
   const fullBodyStanding = hasAnkles && isStanding;
-  const sideRank = (frontLabel === "side_facing" && fullBodyStanding) ? 1 : 0;
+  // Side = edge-on shoulders (narrow shoulder-to-torso ratio) + full-body standing.
+  // NB: don't use frontLabel here — a real profile scores in the "angled" band, not
+  // "side_facing", so the label misses it; the shoulder narrowness is the true signal.
+  const shoulderW = Math.abs(ls.x - rs.x);
+  const torsoH = Math.abs((lh.y + rh.y) / 2 - (ls.y + rs.y) / 2);
+  const shoulderRatio = torsoH > 0 ? shoulderW / torsoH : 1;
+  const sideRank = (fullBodyStanding && shoulderRatio < SIDE_RATIO_MAX) ? 1 : 0;
 
   // Front-facing rank (requires front-facing + adequate shoulder width) — unchanged.
   if (frontScore < POSE_FRONT_FACING_MIN_SCORE) {
