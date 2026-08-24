@@ -387,7 +387,7 @@ var AuthService = class {
     const token = await this.resolveToken();
     return {
       "Authorization": `Bearer ${token}`,
-      "X-SDK-Version": "0.3.0"
+      "X-SDK-Version": "0.3.2"
     };
   }
   getProxyUrl() {
@@ -2574,7 +2574,53 @@ var PersonalizeSDK = class _PersonalizeSDK {
     // ── Selection summary ───────────────────────────────────────────────────────
     this.selection = {
       getSummary: () => this.selectionSummary,
-      getAssets: () => [...this.selectedAssets]
+      getAssets: () => [...this.selectedAssets],
+      /**
+       * Override which photo personalize()/personalizeAll() uses for a category, after
+       * ingestImages() has already run its own local-AI + LLM selection.
+       *
+       * Why this exists: personalize() picks a photo purely by category
+       * (this.selectedAssets.find(a => a.category === requiredCategory)) with no concept
+       * of "which real person" that category's photo belongs to. A caller that has
+       * separately resolved identity across MULTIPLE categories/measurements (e.g. an
+       * integration doing its own face-cluster-frequency ranking to keep body sizing,
+       * face sizing, and try-on all pointing at the same person when a gender bucket
+       * contains more than one real person) needs a way to pin the exact blob VTO will
+       * use, instead of trusting selectedAssets' independent pick. Without this, VTO
+       * could render onto a different person than body/face measurement used, even
+       * though both sit under the same gender profile.
+       *
+       * Uses the same replace-in-place pattern as the existing internal LLM refinement
+       * (refineSelectionWithLLM) — just exposed for external callers. Safe to call
+       * multiple times; each call for the same category replaces the prior override.
+       */
+      override: (category, blob, hash) => {
+        const resolvedHash = hash ?? `override-${category}-${blob.size}-${blob.lastModified ?? Date.now()}`;
+        const idx = this.selectedAssets.findIndex((a) => a.category === category);
+        const asset = {
+          category,
+          imageId: resolvedHash,
+          blob,
+          hash: resolvedHash,
+          confidence: 1,
+          qualityScore: idx >= 0 ? this.selectedAssets[idx].qualityScore : 1,
+          source: "merged",
+          createdAt: (/* @__PURE__ */ new Date()).toISOString()
+        };
+        if (idx >= 0) {
+          this.selectedAssets[idx] = asset;
+        } else {
+          this.selectedAssets.push(asset);
+        }
+        if (this.selectionSummary && !this.selectionSummary.availableCategories.includes(category)) {
+          this.selectionSummary = {
+            ...this.selectionSummary,
+            availableCategories: [...this.selectionSummary.availableCategories, category],
+            missingCategories: this.selectionSummary.missingCategories.filter((c) => c !== category)
+          };
+        }
+        this.dbg.log("selection_override", { category, hash: resolvedHash });
+      }
     };
     /** v0.2+: measurement handoff — cluster + body/face shortlists from scanIndex (no re-inference). */
     this.measurement = {

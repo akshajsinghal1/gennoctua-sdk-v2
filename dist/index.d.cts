@@ -523,6 +523,26 @@ declare class PersonalizeSDK {
     selection: {
         getSummary: () => SelectionSummary | null;
         getAssets: () => SelectedImageAsset[];
+        /**
+         * Override which photo personalize()/personalizeAll() uses for a category, after
+         * ingestImages() has already run its own local-AI + LLM selection.
+         *
+         * Why this exists: personalize() picks a photo purely by category
+         * (this.selectedAssets.find(a => a.category === requiredCategory)) with no concept
+         * of "which real person" that category's photo belongs to. A caller that has
+         * separately resolved identity across MULTIPLE categories/measurements (e.g. an
+         * integration doing its own face-cluster-frequency ranking to keep body sizing,
+         * face sizing, and try-on all pointing at the same person when a gender bucket
+         * contains more than one real person) needs a way to pin the exact blob VTO will
+         * use, instead of trusting selectedAssets' independent pick. Without this, VTO
+         * could render onto a different person than body/face measurement used, even
+         * though both sit under the same gender profile.
+         *
+         * Uses the same replace-in-place pattern as the existing internal LLM refinement
+         * (refineSelectionWithLLM) — just exposed for external callers. Safe to call
+         * multiple times; each call for the same category replaces the prior override.
+         */
+        override: (category: UserImageCategory, blob: Blob, hash?: string) => void;
     };
     /** v0.2+: measurement handoff — cluster + body/face shortlists from scanIndex (no re-inference). */
     measurement: {

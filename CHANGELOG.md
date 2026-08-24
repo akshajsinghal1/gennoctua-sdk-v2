@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2] — 2026-08-24
+
+### Added
+- **`sdk.selection.override(category, blob, hash?)`** — pin the exact photo `personalize()`/`personalizeAll()` uses for a category, bypassing the SDK's own independent `selectedAssets` pick. For integrations that separately resolve identity across body sizing, face sizing, and VTO (e.g. a face-cluster-frequency ranking when a gender bucket contains more than one real person) — without this, VTO could render onto a different person than body/face measurement used, even though both sit under the same gender profile.
+
+---
+
 ## [0.3.1] — 2026-08-14
 
 ### Fixed
